@@ -511,7 +511,15 @@ fn reorder_with_mod_dir(
     }
 
     // Macro pipeline stages 1–3: segments, definitions, per-item uses.
-    let segments = crate::macros::compute_segments(&parsed.items);
+    // `#[macro_use] mod foo;` is demoted from a hard barrier when the
+    // child file's exported macros are provably unused by any sibling
+    // in this scope; the precise check costs one extra child-file open
+    // but unlocks reordering across mods that don't actually leak any
+    // call sites.
+    let macro_use_relevant =
+        crate::macros::compute_macro_use_relevance(&parsed.items, &item_streams, mod_dir);
+    let segments =
+        crate::macros::compute_segments(&parsed.items, |i| macro_use_relevant.contains(&i));
     let macro_defs = crate::macros::collect_macro_defs(&parsed.items);
     let macro_names: HashSet<String> = macro_defs.iter().map(|(n, _)| n.clone()).collect();
     let item_uses = crate::macros::collect_item_uses(&parsed.items, &item_streams, &macro_names);
@@ -588,7 +596,7 @@ fn reorder_with_mod_dir(
         item_to_token_stream,
     );
     let effective_uses = crate::macros::compute_effective_uses(&item_uses, &macro_defs);
-    crate::macros::yank_macro_defs(
+    let cap_hit = crate::macros::yank_macro_defs(
         &mut blocks,
         &macro_defs,
         &effective_uses,
@@ -596,6 +604,15 @@ fn reorder_with_mod_dir(
         &conservative_mods,
         |b| b.sort_key.original_index,
     );
+    if cap_hit {
+        let where_ = mod_dir
+            .map(|d| format!(" near {}", d.display()))
+            .unwrap_or_default();
+        eprintln!(
+            "cargo-reorder: warning: macro_rules! yank fixpoint hit iteration cap{where_}; \
+             output is safe but may be sub-optimal. Please file a bug with a minimal repro.",
+        );
+    }
 
     let header = take_lines(&lines, 1, header_end_line);
     Ok(crate::emit::assemble(

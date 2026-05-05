@@ -309,21 +309,21 @@ recursion, visibility handling) is fixed by the source.
 ## On `--pub-mod-first`
 
 Counting scopes that contain BOTH a `pub mod foo;` and a private
-`mod foo;` declaration — 91 scopes across the 9 projects:
+`mod foo;` declaration (external declarations only, not inline
+`mod foo { ... }` blocks) — 64 scopes across the 9 projects:
 
 | project | pub-first | priv-first | interleaved |
 | --- | --: | --: | --: |
-| anyhow | 1 | 2 | 0 |
 | ripgrep | 0 | 0 | 1 |
 | serde | 4 | 2 | 0 |
-| clap | 2 | 4 | 2 |
+| syn | 1 | 0 | 1 |
+| clap | 1 | 4 | 2 |
 | regex | 2 | 1 | 5 |
-| syn | 12 | 0 | 2 |
-| tracing | 3 | 4 | 5 |
-| cargo | 2 | 4 | 10 |
-| tokio | 5 | 3 | 15 |
+| tracing | 1 | 3 | 3 |
+| cargo | 2 | 2 | 10 |
+| tokio | 3 | 2 | 14 |
 
-Aggregate: **34% pub-first, 22% private-first, 44% interleaved**.
+Aggregate: **22% pub-first, 22% private-first, 56% interleaved**.
 Default keeps the relative order from the source — `pub mod` and
 `mod` aren't reshuffled by visibility.
 
@@ -331,22 +331,27 @@ Default keeps the relative order from the source — `pub mod` and
 
 There is **no official rule** about whether `mod` or `use` comes
 first. Counting scopes that contain both an external `mod foo;`
-declaration and a `use ...;` — 417 scopes across the 9 projects:
+declaration and a `use ...;` — 254 scopes across the 9 projects
+(inline `mod foo { ... }` blocks don't count as `mod` declarations
+for this comparison; their bodies are sampled separately as their
+own scopes):
 
 | project | use-first | mod-first |
 | --- | --: | --: |
-| anyhow | 100% | 0% |
-| clap | 100% | 0% |
-| regex | 100% | 0% |
 | ripgrep | 100% | 0% |
 | cargo | 100% | 0% |
-| tracing | 97% | 3% |
-| syn | 96% | 4% |
-| serde | 91% | 9% |
-| tokio | 75% | 25% |
+| regex | 96% | 4% |
+| tracing | 96% | 4% |
+| clap | 95% | 5% |
+| anyhow | 83% | 17% |
+| serde | 78% | 22% |
+| tokio | 42% | 58% |
+| syn | 15% | 85% |
 
-Aggregate: **91% use-first, 9% mod-first**. Default is use-first;
-pass `--mod-before-use` if your project leans the other way.
+Aggregate: **76% use-first, 24% mod-first**. Default is use-first;
+pass `--mod-before-use` if your project leans the other way (notably
+`syn`, which is overwhelmingly mod-first inside its many inline
+sub-modules, and `tokio`, which is mod-first across its workspace).
 
 ## On `--struct-before-trait`
 
@@ -446,15 +451,15 @@ re-ran the tests to confirm test results are identical to the baseline.
 
 | project | total `.rs` | LOC | files reordered | reorder time | compiles | tests |
 | --- | --: | --: | --: | --: | :-: | :-: |
-| [anyhow](https://github.com/dtolnay/anyhow) | 37 | 5,833 | 21 | 0.09 s | ✅ | ✅ (3) |
-| [serde](https://github.com/serde-rs/serde) | 208 | 42,630 | 42 | 0.21 s | ✅ | ✅ (5) |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | 100 | 52,266 | 44 | 0.41 s | ✅ | * (no `[lib]` target) |
-| [syn](https://github.com/dtolnay/syn) | 133 | 68,988 | 70 | 0.56 s | ✅ ** | — (suite needs `rustc-dev`, nightly) |
-| [tracing](https://github.com/tokio-rs/tracing) | 260 | 71,547 | 123 | 0.48 s | ✅ | ✅ (188) |
-| [clap](https://github.com/clap-rs/clap) | 329 | 83,179 | 80 | 0.42 s | ✅ | ✅ |
-| [regex](https://github.com/rust-lang/regex) | 225 | 159,330 | 84 | 1.26 s | ✅ | ✅ (7) |
-| [tokio](https://github.com/tokio-rs/tokio) | 777 | 173,773 | 254 | 0.59 s | ✅ | ✅ (lib, 146) |
-| [cargo](https://github.com/rust-lang/cargo) | 1,352 | 333,542 | 783 | 2.13 s | ✅ | ✅ (lib, 160) |
+| [anyhow](https://github.com/dtolnay/anyhow) | 37 | 5,833 | 21 | 0.11 s | ✅ | ✅ (3) |
+| [serde](https://github.com/serde-rs/serde) | 208 | 42,630 | 42 | 0.23 s | ✅ | ✅ (5) |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | 100 | 52,266 | 42 | 0.46 s | ✅ | * (no `[lib]` target) |
+| [syn](https://github.com/dtolnay/syn) | 133 | 68,988 | 71 | 0.59 s | ✅ ** | — (suite needs `rustc-dev`, nightly) |
+| [tracing](https://github.com/tokio-rs/tracing) | 260 | 71,547 | 123 | 0.51 s | ✅ | ✅ (188) |
+| [clap](https://github.com/clap-rs/clap) | 329 | 83,179 | 80 | 0.47 s | ✅ | ✅ |
+| [regex](https://github.com/rust-lang/regex) | 225 | 159,330 | 83 | 1.38 s | ✅ | ✅ (7) |
+| [tokio](https://github.com/tokio-rs/tokio) | 777 | 173,843 | 254 | 0.65 s | ✅ | ✅ (lib, 146) |
+| [cargo](https://github.com/rust-lang/cargo) | 1,352 | 333,542 | 782 | 2.42 s | ✅ | ✅ (lib, 160) |
 
 `*` ripgrep is a binary crate with no `[lib]` target; `cargo test
 --lib` is N/A, but `cargo check --all-targets` passes after reorder.

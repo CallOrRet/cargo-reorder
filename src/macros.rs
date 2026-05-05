@@ -26,21 +26,36 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use std::str::FromStr;
+
 use proc_macro2::{TokenStream, TokenTree};
 use syn::Item;
 
 /// Collect `Ident !` pairs whose ident is in `names`. Recurses into
 /// delimited groups so calls inside `impl` blocks, fn bodies, etc.
 /// are found.
+///
+/// Path-qualified calls (`crate::foo!()`, `other_crate::foo!()`,
+/// `<T>::foo!()`) are skipped: a path-qualified macro call is name-
+/// resolved and doesn't constrain the textual order of any local
+/// `macro_rules!`. Detected by checking whether the ident is
+/// immediately preceded by a `:` punct.
 pub(crate) fn find_calls(ts: TokenStream, names: &HashSet<String>, found: &mut HashSet<String>) {
     let toks: Vec<TokenTree> = ts.into_iter().collect();
     for i in 0..toks.len() {
         if let TokenTree::Ident(id) = &toks[i] {
             if let Some(TokenTree::Punct(p)) = toks.get(i + 1) {
                 if p.as_char() == '!' {
-                    let n = id.to_string();
-                    if names.contains(&n) {
-                        found.insert(n);
+                    let preceded_by_colon = i
+                        .checked_sub(1)
+                        .and_then(|j| toks.get(j))
+                        .map(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ':'))
+                        .unwrap_or(false);
+                    if !preceded_by_colon {
+                        let n = id.to_string();
+                        if names.contains(&n) {
+                            found.insert(n);
+                        }
                     }
                 }
             }
@@ -94,10 +109,21 @@ pub(crate) fn collect_use_leaves(
 /// enclosing scope's mod-directory joined with `foo` (or with the
 /// `#[path]` override's parent dir).
 ///
-/// Returns `Some(set)` when the child opened cleanly (set may be
-/// empty — child imports or doesn't use any of our macros), or
-/// `None` when the child can't be read or parsed (caller falls back
-/// to the conservative "every mod constrains every macro" rule).
+/// Returns `Some(set)` when the child file's path resolves and the
+/// file is readable. The fast path parses the child with `syn` and
+/// subtracts any `use ... ::name;` imports from the bare-call set;
+/// when parsing fails we fall back to a token-only scan via
+/// `proc_macro2::TokenStream::from_str`, which can still recognise
+/// `name!()` calls in syntactically broken (but lex-valid) files —
+/// notably codegen output, in-progress edits, and `#[cfg]`-gated
+/// alternatives that don't all parse on their own. The fallback
+/// can't subtract imports (no AST), so it's strictly more
+/// conservative than the parsed path but still strictly less
+/// conservative than treating every macro as a potential need.
+///
+/// Returns `None` only when the child path can't be resolved or the
+/// file can't be read (or even tokenised). Callers fall back to
+/// "every mod constrains every macro" in that case.
 pub(crate) fn scan_child(
     mod_dir: &Path,
     m: &syn::ItemMod,
@@ -106,19 +132,27 @@ pub(crate) fn scan_child(
 ) -> Option<HashSet<String>> {
     let candidate = crate::discover::external_mod_file(mod_dir, m)?;
     let src = std::fs::read_to_string(&candidate).ok()?;
-    let parsed = syn::parse_file(&src).ok()?;
 
-    let mut imported: HashSet<String> = HashSet::new();
-    for it in &parsed.items {
-        if let Item::Use(u) = it {
-            collect_use_leaves(&u.tree, local_macros, &mut imported);
+    if let Ok(parsed) = syn::parse_file(&src) {
+        let mut imported: HashSet<String> = HashSet::new();
+        for it in &parsed.items {
+            if let Item::Use(u) = it {
+                collect_use_leaves(&u.tree, local_macros, &mut imported);
+            }
         }
+        let mut bare: HashSet<String> = HashSet::new();
+        for it in &parsed.items {
+            find_calls(item_to_tokens(it), local_macros, &mut bare);
+        }
+        return Some(bare.difference(&imported).cloned().collect());
     }
+
+    // Token-only fallback: parse fails (bad syntax / unstable /
+    // codegen-with-placeholders) but the lexer often still works.
+    let ts = TokenStream::from_str(&src).ok()?;
     let mut bare: HashSet<String> = HashSet::new();
-    for it in &parsed.items {
-        find_calls(item_to_tokens(it), local_macros, &mut bare);
-    }
-    Some(bare.difference(&imported).cloned().collect())
+    find_calls(ts, local_macros, &mut bare);
+    Some(bare)
 }
 
 /// Stage 1: items that *export* macros into the surrounding scope
@@ -134,14 +168,26 @@ pub(crate) fn scan_child(
 ///   Without a barrier, `--pub-mod-first` (or any flag that re-buckets
 ///   mods) can move a sibling above the `#[macro_use] mod` line and
 ///   break the build (observed on syn's lib.rs).
-pub(crate) fn compute_segments(items: &[Item]) -> Vec<u32> {
+///
+/// `macro_use_is_barrier` lets the caller demote `#[macro_use] mod`
+/// items whose leaked macros are provably *not* used by any sibling
+/// in this scope (so the barrier costs sort quality without paying
+/// for any safety). Returning `true` for an index keeps it as a
+/// barrier (the safe default); `false` demotes it. Bare top-level
+/// macro invocations are always barriers and don't consult this
+/// closure.
+pub(crate) fn compute_segments(
+    items: &[Item],
+    macro_use_is_barrier: impl Fn(usize) -> bool,
+) -> Vec<u32> {
     let mut barriers_seen = 0u32;
     items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(idx, item)| {
             let is_barrier = match item {
                 Item::Macro(m) => m.ident.is_none(),
-                Item::Mod(m) => has_macro_use_attr(&m.attrs),
+                Item::Mod(m) => has_macro_use_attr(&m.attrs) && macro_use_is_barrier(idx),
                 _ => false,
             };
             if is_barrier {
@@ -152,6 +198,90 @@ pub(crate) fn compute_segments(items: &[Item]) -> Vec<u32> {
             barriers_seen * 2
         })
         .collect()
+}
+
+/// Names of `macro_rules!` defined at the top level of `items`.
+/// Inline `mod foo { ... }` bodies are *not* recursed into — those
+/// macros don't leak past the inline mod boundary unless the inline
+/// mod itself carries `#[macro_use]`.
+fn top_level_macro_rules_names(items: &[Item]) -> HashSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Macro(m) => m.ident.as_ref().map(|n| n.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Decide which `#[macro_use] mod` items in `items` actually need to
+/// stay barriers. A `#[macro_use] mod foo;` is *relevant* (returns
+/// barrier-needed = true) when:
+///
+/// * the child file (or inline body) defines at least one
+///   `macro_rules! NAME`, AND
+/// * some sibling item bare-invokes NAME.
+///
+/// External mods whose child can't be opened/parsed conservatively
+/// stay as barriers (we can't prove they don't leak callers).
+pub(crate) fn compute_macro_use_relevance(
+    items: &[Item],
+    item_streams: &[TokenStream],
+    mod_dir: Option<&Path>,
+) -> HashSet<usize> {
+    let mut relevant: HashSet<usize> = HashSet::new();
+    for (idx, item) in items.iter().enumerate() {
+        let Item::Mod(m) = item else { continue };
+        if !has_macro_use_attr(&m.attrs) {
+            continue;
+        }
+        // Determine the set of `macro_rules!` exported from this mod.
+        let exported: HashSet<String> = match &m.content {
+            // Inline body — read directly.
+            Some((_, inner)) => top_level_macro_rules_names(inner),
+            // External — open the child file, parse, collect.
+            None => {
+                let Some(dir) = mod_dir else {
+                    relevant.insert(idx);
+                    continue;
+                };
+                let Some(child) = crate::discover::external_mod_file(dir, m) else {
+                    relevant.insert(idx);
+                    continue;
+                };
+                let Ok(src) = std::fs::read_to_string(&child) else {
+                    relevant.insert(idx);
+                    continue;
+                };
+                let Ok(parsed) = syn::parse_file(&src) else {
+                    relevant.insert(idx);
+                    continue;
+                };
+                top_level_macro_rules_names(&parsed.items)
+            }
+        };
+        if exported.is_empty() {
+            // No macros leak — barrier carries no safety. Demote.
+            continue;
+        }
+        // Any sibling bare-call of an exported name keeps the barrier.
+        let mut needed = false;
+        for (j, ts) in item_streams.iter().enumerate() {
+            if j == idx {
+                continue;
+            }
+            let mut found: HashSet<String> = HashSet::new();
+            find_calls(ts.clone(), &exported, &mut found);
+            if !found.is_empty() {
+                needed = true;
+                break;
+            }
+        }
+        if needed {
+            relevant.insert(idx);
+        }
+    }
+    relevant
 }
 
 fn has_macro_use_attr(attrs: &[syn::Attribute]) -> bool {
@@ -175,6 +305,14 @@ pub(crate) fn collect_macro_defs(items: &[Item]) -> Vec<(String, usize)> {
 /// Stage 3: for each item, the set of local macros it bare-invokes
 /// (excluding self-references, which don't impose ordering). `item_streams[i]`
 /// must be the TokenStream representation of `items[i]`.
+///
+/// Calls whose name is shadowed by a parent-scope `use ... ::name;`
+/// import (with `as` rename support) don't constrain the local
+/// `macro_rules! name` — the call resolves to the imported one. In
+/// well-formed Rust this only matters when the local macro and the
+/// imported one have different names AND a renamed `use ... as foo;`
+/// brings something else under the same name; the subtraction is
+/// defensive but correct.
 pub(crate) fn collect_item_uses(
     items: &[Item],
     item_streams: &[TokenStream],
@@ -184,6 +322,12 @@ pub(crate) fn collect_item_uses(
     if macro_names.is_empty() {
         return item_uses;
     }
+    let mut imported: HashSet<String> = HashSet::new();
+    for it in items {
+        if let Item::Use(u) = it {
+            collect_use_leaves(&u.tree, macro_names, &mut imported);
+        }
+    }
     for (i, (item, ts)) in items.iter().zip(item_streams).enumerate() {
         let mut found: HashSet<String> = HashSet::new();
         find_calls(ts.clone(), macro_names, &mut found);
@@ -191,6 +335,9 @@ pub(crate) fn collect_item_uses(
             if let Some(name) = &m.ident {
                 found.remove(&name.to_string());
             }
+        }
+        for name in &imported {
+            found.remove(name);
         }
         if !found.is_empty() {
             item_uses.insert(i, found);
@@ -281,6 +428,11 @@ pub(crate) fn collect_mod_constraints(
 ///
 /// `original_index` extracts each block's source-order index so this
 /// function stays agnostic about the caller's block representation.
+///
+/// Returns `true` when the cap was reached without converging — the
+/// resulting order is still safe (every move during the loop is
+/// monotonic: a macro only ever moves earlier) but may not be optimal.
+/// Caller can surface a diagnostic.
 pub(crate) fn yank_macro_defs<T>(
     blocks: &mut Vec<T>,
     macro_defs: &[(String, usize)],
@@ -288,9 +440,9 @@ pub(crate) fn yank_macro_defs<T>(
     mod_constraints: &HashMap<usize, HashSet<String>>,
     conservative_mods: &[usize],
     original_index: impl Fn(&T) -> usize,
-) {
+) -> bool {
     if macro_defs.is_empty() {
-        return;
+        return false;
     }
     // Reverse indexes built once: macro name -> origs that constrain it.
     // The constraint sets don't change as macro defs move within `blocks`,
@@ -324,9 +476,11 @@ pub(crate) fn yank_macro_defs<T>(
     let mut pos: Vec<usize> = vec![usize::MAX; max_orig];
 
     let mut iter_cap = macro_defs.len().saturating_mul(4) + 32;
+    let mut cap_hit = false;
     loop {
         iter_cap = iter_cap.saturating_sub(1);
         if iter_cap == 0 {
+            cap_hit = true;
             break;
         }
         for slot in pos.iter_mut() {
@@ -395,4 +549,5 @@ pub(crate) fn yank_macro_defs<T>(
             break;
         }
     }
+    cap_hit
 }

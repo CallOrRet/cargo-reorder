@@ -244,39 +244,38 @@ cargo build --release --bin sample-stats
 
 ## 关于 `--pub-mod-first`
 
-统计同时含 `pub mod foo;` 和私有 `mod foo;` 声明的 scope —— 9 个项目共 91 个 scope：
+统计同时含 `pub mod foo;` 和私有 `mod foo;` 声明的 scope（只看外部声明，不算 inline `mod foo { ... }` 块）—— 9 个项目共 64 个 scope：
 
 | 项目 | pub-first | priv-first | interleaved |
 | --- | --: | --: | --: |
-| anyhow | 1 | 2 | 0 |
 | ripgrep | 0 | 0 | 1 |
 | serde | 4 | 2 | 0 |
-| clap | 2 | 4 | 2 |
+| syn | 1 | 0 | 1 |
+| clap | 1 | 4 | 2 |
 | regex | 2 | 1 | 5 |
-| syn | 12 | 0 | 2 |
-| tracing | 3 | 4 | 5 |
-| cargo | 2 | 4 | 10 |
-| tokio | 5 | 3 | 15 |
+| tracing | 1 | 3 | 3 |
+| cargo | 2 | 2 | 10 |
+| tokio | 3 | 2 | 14 |
 
-合计：**34% pub-first，22% priv-first，44% interleaved**。默认保留源序 —— `pub mod` 和 `mod` 不按可见性重新洗牌。
+合计：**22% pub-first，22% priv-first，56% interleaved**。默认保留源序 —— `pub mod` 和 `mod` 不按可见性重新洗牌。
 
 ## 关于 `--mod-before-use`
 
-**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope —— 9 个项目共 417 个：
+**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 9 个项目共 254 个：
 
 | 项目 | use-first | mod-first |
 | --- | --: | --: |
-| anyhow | 100% | 0% |
-| clap | 100% | 0% |
-| regex | 100% | 0% |
 | ripgrep | 100% | 0% |
 | cargo | 100% | 0% |
-| tracing | 97% | 3% |
-| syn | 96% | 4% |
-| serde | 91% | 9% |
-| tokio | 75% | 25% |
+| regex | 96% | 4% |
+| tracing | 96% | 4% |
+| clap | 95% | 5% |
+| anyhow | 83% | 17% |
+| serde | 78% | 22% |
+| tokio | 42% | 58% |
+| syn | 15% | 85% |
 
-合计：**91% use-first，9% mod-first**。默认 use-first；项目偏 mod-first 时加 `--mod-before-use`。
+合计：**76% use-first，24% mod-first**。默认 use-first；项目偏 mod-first 时（典型如 `syn`，大量 inline 子模块内部全是 mod-first；以及 `tokio` 在工作区层面整体偏 mod-first）加 `--mod-before-use`。
 
 ## 关于 `--struct-before-trait`
 
@@ -357,15 +356,15 @@ cargo reorder --all
 
 | 项目 | 总 .rs | LOC | 重排数 | 用时 | 编译 | 测试 |
 | --- | --: | --: | --: | --: | :-: | :-: |
-| [anyhow](https://github.com/dtolnay/anyhow) | 37 | 5,833 | 21 | 0.09 s | ✅ | ✅（3）|
-| [serde](https://github.com/serde-rs/serde) | 208 | 42,630 | 42 | 0.21 s | ✅ | ✅（5）|
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | 100 | 52,266 | 44 | 0.41 s | ✅ | *（无 `[lib]` target）|
-| [syn](https://github.com/dtolnay/syn) | 133 | 68,988 | 70 | 0.56 s | ✅ ** | —（测试 suite 依赖 `rustc-dev`，仅 nightly）|
-| [tracing](https://github.com/tokio-rs/tracing) | 260 | 71,547 | 123 | 0.48 s | ✅ | ✅（188）|
-| [clap](https://github.com/clap-rs/clap) | 329 | 83,179 | 80 | 0.42 s | ✅ | ✅ |
-| [regex](https://github.com/rust-lang/regex) | 225 | 159,330 | 84 | 1.26 s | ✅ | ✅（7）|
-| [tokio](https://github.com/tokio-rs/tokio) | 777 | 173,773 | 254 | 0.59 s | ✅ | ✅（lib，146）|
-| [cargo](https://github.com/rust-lang/cargo) | 1,352 | 333,542 | 783 | 2.13 s | ✅ | ✅（lib，160）|
+| [anyhow](https://github.com/dtolnay/anyhow) | 37 | 5,833 | 21 | 0.11 s | ✅ | ✅（3）|
+| [serde](https://github.com/serde-rs/serde) | 208 | 42,630 | 42 | 0.23 s | ✅ | ✅（5）|
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | 100 | 52,266 | 42 | 0.46 s | ✅ | *（无 `[lib]` target）|
+| [syn](https://github.com/dtolnay/syn) | 133 | 68,988 | 71 | 0.59 s | ✅ ** | —（测试 suite 依赖 `rustc-dev`，仅 nightly）|
+| [tracing](https://github.com/tokio-rs/tracing) | 260 | 71,547 | 123 | 0.51 s | ✅ | ✅（188）|
+| [clap](https://github.com/clap-rs/clap) | 329 | 83,179 | 80 | 0.47 s | ✅ | ✅ |
+| [regex](https://github.com/rust-lang/regex) | 225 | 159,330 | 83 | 1.38 s | ✅ | ✅（7）|
+| [tokio](https://github.com/tokio-rs/tokio) | 777 | 173,843 | 254 | 0.65 s | ✅ | ✅（lib，146）|
+| [cargo](https://github.com/rust-lang/cargo) | 1,352 | 333,542 | 782 | 2.42 s | ✅ | ✅（lib，160）|
 
 `*` ripgrep 是 binary crate（没有 `[lib]` target），所以 `cargo test --lib` 不适用，但 `cargo check --all-targets` 重排后通过。
 `**` syn 编译失败和 baseline 完全一致 —— 它的测试 suite 强制要 `--all-features`，引入了只在 nightly `rustc-dev` 组件里的 internal crate。不是我们工具搞坏的。

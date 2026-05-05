@@ -97,6 +97,13 @@ fn observe(items: &[Item]) -> FileObs {
                 if is_test_mod(m) {
                     continue; // skip tests mods entirely
                 }
+                // Only external `mod foo;` declarations count for the
+                // mod-vs-use and pub/priv arrangement stats. Inline
+                // `mod foo { ... }` blocks are a different construct
+                // (their bodies are sampled as a fresh scope below).
+                if m.content.is_some() {
+                    continue;
+                }
                 if o.first_mod.is_none() {
                     o.first_mod = Some(idx);
                 }
