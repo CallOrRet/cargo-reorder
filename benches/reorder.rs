@@ -240,11 +240,17 @@ fn self_file(c: &mut Criterion) {
 // inspected with `pprof -top profile.pb`, `go tool pprof`, or grepped
 // directly for symbol names. 4000 Hz sampling resolves microsecond-level
 // per-iter functions; the OS hard cap is around 10 kHz on Linux.
+#[cfg(unix)]
 fn profiled() -> Criterion {
     Criterion::default().with_profiler(pprof::criterion::PProfProfiler::new(
         4000,
         pprof::criterion::Output::Protobuf,
     ))
+}
+
+#[cfg(not(unix))]
+fn profiled() -> Criterion {
+    Criterion::default()
 }
 
 criterion_group!(
