@@ -253,7 +253,7 @@ Grouped by function.
 | `--no-import-groups` | don't split imports into std / external / crate |
 | `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
-| `--reorder-inline-mods` | also reorder bodies of inline `mod foo { ... }` blocks (see "On `--reorder-inline-mods`" below) |
+| `--no-reorder-inline-mods` | don't reorder bodies of inline `mod foo { ... }` blocks (see "On `--no-reorder-inline-mods`" below) |
 
 ### Output mode
 
@@ -376,13 +376,13 @@ trait-first. Most crate-internal abstractions are written as
 Default is trait-first; pass `--struct-before-trait` only if your
 project bucks this pattern.
 
-## On `--reorder-inline-mods`
+## On `--no-reorder-inline-mods`
 
-By default cargo-reorder only sorts items at the **file top
-level**. The bodies of inline `mod foo { ... }` blocks are
-preserved byte-for-byte. Pass `--reorder-inline-mods` to
-recursively apply the same rules inside every inline mod body
-(further-nested inline mods recurse too).
+By default cargo-reorder recurses into inline `mod foo { ... }`
+blocks and applies the same rules to their bodies (and to any
+inline mods nested inside). Pass `--no-reorder-inline-mods` to
+restrict reordering to the **file top level** only and leave every
+inline mod body byte-for-byte untouched.
 
 Recursion deliberately **skips** three patterns where the
 listing order is part of the contract or affects compilation:

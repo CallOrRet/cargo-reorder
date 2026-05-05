@@ -1,7 +1,8 @@
-//! Coverage for `--reorder-inline-mods`. Default OFF: inline mod
-//! bodies must stay byte-identical to the source. ON: bodies are
+//! Coverage for inline-mod reordering. Default ON: bodies are
 //! reordered with the same rules, except for the documented skip
-//! list (test mods, `#[macro_use]`, pure-`use` mods).
+//! list (test mods, `#[macro_use]`, pure-`use` mods). With
+//! `--no-reorder-inline-mods` (i.e. `Config { reorder_inline_mods:
+//! false }`), inline mod bodies stay byte-identical to the source.
 
 use std::env;
 use std::fs;
@@ -50,7 +51,7 @@ fn cfg_recurse() -> Config {
 }
 
 #[test]
-fn default_does_not_touch_inline_mod_body() {
+fn opt_out_does_not_touch_inline_mod_body() {
     let input = "\
 mod inner {
     fn b() {}
@@ -58,12 +59,16 @@ mod inner {
     struct S;
 }
 ";
-    let out = reorder_source(input).unwrap();
-    // Default: only top-level reordered (there's only one item, so nothing
+    let cfg = Config {
+        reorder_inline_mods: false,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    // With opt-out, only top-level is reordered (one item here, so nothing
     // moves). Body verbatim.
     assert!(
         out.contains("mod inner {\n    fn b() {}\n    use std::fmt;\n    struct S;\n}"),
-        "default must leave inline mod body untouched:\n{out}"
+        "opt-out must leave inline mod body untouched:\n{out}"
     );
 }
 

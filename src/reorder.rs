@@ -221,7 +221,7 @@ pub struct Config {
     /// matches the slight majority in real-world Rust files — see README).
     pub struct_before_trait: bool,
     /// Recurse into inline `mod foo { ... }` blocks and reorder their bodies
-    /// with the same rules. Off by default — see README for the skip list
+    /// with the same rules. On by default — see README for the skip list
     /// (test mods, `#[macro_use]` mods, pure-`use` mods).
     pub reorder_inline_mods: bool,
 }
@@ -235,7 +235,7 @@ impl Default for Config {
             tests_last: true,
             pub_mod_first: false,
             struct_before_trait: false,
-            reorder_inline_mods: false,
+            reorder_inline_mods: true,
         }
     }
 }

@@ -2,7 +2,7 @@
 //! sparse files, large blank-line stretches, weird shebang+frontmatter
 //! combos, etc. These shouldn't crash or mangle the output.
 
-use cargo_reorder::reorder_source;
+use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 #[test]
 fn empty_file_unchanged() {
@@ -88,10 +88,15 @@ mod inner {
 
 use std::fmt;
 ";
-    let out = reorder_source(input).unwrap();
+    let cfg = Config {
+        reorder_inline_mods: false,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
     syn::parse_file(&out).unwrap();
-    // We only reorder TOP-level items. The inline `mod inner { ... }`
-    // body is treated as opaque — its inner items are not reshuffled.
+    // With `reorder_inline_mods: false` we only reorder TOP-level items.
+    // The inline `mod inner { ... }` body is treated as opaque — its
+    // inner items are not reshuffled.
     assert!(out.contains("mod inner {\n    pub fn helper() {}\n    use crate::shared::Thing;\n    pub struct Inside;\n}"),
         "inline mod body must remain intact:\n{out}");
 }
