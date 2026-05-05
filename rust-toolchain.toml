@@ -1,0 +1,13 @@
+# Pin all contributors to the same toolchain so clippy / rustfmt / rustc
+# behave identically locally and in CI. Bumping this file is a deliberate
+# act — review the new lints clippy adds (cargo clippy --all-targets) and
+# fix or `#[allow(...)]` them in the same PR.
+#
+# Note: this only affects developers building from source. End users who
+# `cargo install cargo-reorder` use their own toolchain; the user-facing
+# minimum is the `rust-version = "1.85"` field in Cargo.toml.
+
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

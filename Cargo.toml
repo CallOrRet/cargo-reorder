@@ -1,0 +1,36 @@
+[package]
+authors      = ["CallOrRet <callorret@icloud.com>"]
+categories   = ["command-line-utilities", "development-tools::cargo-plugins"]
+description  = "Reorder top-level items in Rust source files following community style"
+edition      = "2024"
+exclude      = ["rust-toolchain.toml"]
+keywords     = ["cargo", "reorder", "format", "items", "imports"]
+license      = "Apache-2.0"
+name         = "cargo-reorder"
+readme       = "README.md"
+repository   = "https://github.com/CallOrRet/cargo-reorder"
+rust-version = "1.85"
+version      = "0.1.0"
+
+[[bin]]
+name = "cargo-reorder"
+path = "src/main.rs"
+
+[lib]
+name = "cargo_reorder"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow      = { version = "1" }
+clap        = { version = "4", features = ["derive"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde_json  = { version = "1" }
+similar     = { version = "3" }
+syn         = { version = "2", features = ["full", "extra-traits", "parsing", "printing", "visit"] }
+walkdir     = { version = "2" }
+
+[dev-dependencies]
+pretty_assertions = { version = "1" }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
