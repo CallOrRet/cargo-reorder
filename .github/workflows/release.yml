@@ -48,10 +48,11 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Show toolchain
+        run: rustc -V && cargo -V
 
       - uses: Swatinem/rust-cache@v2
         with:

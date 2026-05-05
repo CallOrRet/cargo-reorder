@@ -25,6 +25,8 @@ jobs:
           - windows-latest     # x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: rustc -V && cargo -V
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets --locked
       - run: cargo test --all-features --locked
