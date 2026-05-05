@@ -450,7 +450,18 @@ fn reorder_with_mod_dir(
 
     let lines: Vec<&str> = split_keep_endings(source);
     let header_end_line = compute_header_end_line(&parsed);
-    let ranges: Vec<(usize, usize)> = parsed.items.iter().map(item_line_range).collect();
+    // Materialise each item's TokenStream once and reuse it for the
+    // line-range pass and any subsequent macro-call scan. Rebuilding via
+    // `item.to_tokens(&mut ts)` is a full syn AST walk; cloning the
+    // produced TokenStream is just a Vec<TokenTree> copy, several × cheaper.
+    let item_streams: Vec<TokenStream> = parsed.items.iter().map(item_to_token_stream).collect();
+    let ranges: Vec<(usize, usize)> = item_streams
+        .iter()
+        .map(|ts| {
+            let (s, e) = tokens_line_range(ts.clone());
+            (s.max(1), e.max(s).max(1))
+        })
+        .collect();
 
     // Anchor index for `impl` blocks that target a local type/trait.
     let mut name_index: HashMap<String, (usize, Category)> = HashMap::new();
@@ -503,8 +514,7 @@ fn reorder_with_mod_dir(
     let segments = crate::macros::compute_segments(&parsed.items);
     let macro_defs = crate::macros::collect_macro_defs(&parsed.items);
     let macro_names: HashSet<String> = macro_defs.iter().map(|(n, _)| n.clone()).collect();
-    let item_uses =
-        crate::macros::collect_item_uses(&parsed.items, &macro_names, item_to_token_stream);
+    let item_uses = crate::macros::collect_item_uses(&parsed.items, &item_streams, &macro_names);
 
     // Pre-item gap (before first item).
     let pre_first_gap = take_lines(&lines, header_end_line + 1, ranges[0].0.saturating_sub(1));
@@ -714,12 +724,6 @@ fn compute_header_end_line(parsed: &File) -> usize {
     max_line
 }
 
-fn item_line_range(item: &Item) -> (usize, usize) {
-    let ts = item_to_token_stream(item);
-    let (s, e) = tokens_line_range(ts);
-    (s.max(1), e.max(s).max(1))
-}
-
 fn tokens_line_range(ts: TokenStream) -> (usize, usize) {
     let mut min: Option<usize> = None;
     let mut max: Option<usize> = None;
@@ -732,6 +736,10 @@ fn tokens_line_range(ts: TokenStream) -> (usize, usize) {
         }
     };
     for tt in ts {
+        // Group::span() already covers the entire delimited group
+        // (open delimiter through close delimiter), so we don't need
+        // to recurse into g.stream() — the inner tokens' lines are
+        // already inside [span.start().line, span.end().line].
         let span = match &tt {
             TokenTree::Group(g) => g.span(),
             TokenTree::Ident(i) => i.span(),
@@ -739,10 +747,6 @@ fn tokens_line_range(ts: TokenStream) -> (usize, usize) {
             TokenTree::Literal(l) => l.span(),
         };
         update(span.start().line, span.end().line);
-        if let TokenTree::Group(g) = tt {
-            let (gs, ge) = tokens_line_range(g.stream());
-            update(gs, ge);
-        }
     }
     (min.unwrap_or(0), max.unwrap_or(0))
 }

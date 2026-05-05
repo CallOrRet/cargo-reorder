@@ -218,3 +218,55 @@ fn no_macros_means_normal_sort() {
         "{out}"
     );
 }
+
+#[test]
+fn macro_use_mod_pins_as_barrier_under_pub_mod_first() {
+    // Models the failure pattern observed on syn/src/lib.rs: a
+    // `#[macro_use] mod foo;` defines (transitively) macros that a later
+    // `pub mod bar;` invokes textually. With `--pub-mod-first`, the naive
+    // sort would lift `pub mod bar;` ahead of `mod foo;`, making the
+    // macro unreachable. The barrier semantics keep them on opposite
+    // sides of the original split.
+    let input = "\
+use std::fmt;
+
+#[macro_use]
+mod helpers;
+
+pub mod consumer;
+mod private_helper;
+";
+    let cfg = cargo_reorder::Config {
+        pub_mod_first: true,
+        ..Default::default()
+    };
+    let out = cargo_reorder::reorder_source_with(input, &cfg).unwrap();
+    let p_use = out.find("#[macro_use]").unwrap();
+    let p_consumer = out.find("pub mod consumer").unwrap();
+    assert!(
+        p_use < p_consumer,
+        "`#[macro_use] mod` must stay before consuming `pub mod`:\n{out}"
+    );
+}
+
+#[test]
+fn macro_use_mod_barrier_partitions_segments() {
+    // Items on opposite sides of a `#[macro_use] mod` cannot cross it,
+    // even when sort weight would otherwise put them together. Here the
+    // `use` after the barrier must NOT be lifted above it.
+    let input = "\
+mod a;
+
+#[macro_use]
+mod helpers;
+
+use std::fmt;
+";
+    let out = reorder_source(input).unwrap();
+    let p_barrier = out.find("#[macro_use]").unwrap();
+    let p_use = out.find("use std::fmt").unwrap();
+    assert!(
+        p_barrier < p_use,
+        "barrier must stay above the `use` that originally followed it:\n{out}"
+    );
+}
