@@ -205,7 +205,7 @@ mod tests {
 | `--no-import-groups` | 不分 std / external / crate 三组 |
 | `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
-| `--reorder-inline-mods` | 同时重排 inline `mod foo { ... }` 的 body（见「关于 `--reorder-inline-mods`」） |
+| `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
 
 ### 输出模式
 
@@ -295,9 +295,9 @@ cargo build --release --bin sample-stats
 
 合计：**87% trait-first，13% struct-first** —— 强烈 trait-first。大部分 crate 内部抽象用 `pub(crate) trait` 写在实现它的 struct **之前**。默认 trait-first；项目逆这个潮流时再加 `--struct-before-trait`。
 
-## 关于 `--reorder-inline-mods`
+## 关于 `--no-reorder-inline-mods`
 
-默认 cargo-reorder 只排**文件顶层**的 item，inline `mod foo { ... }` 的 body 保持字节不动。加 `--reorder-inline-mods` 之后递归用同一套规则处理每个 inline mod 的 body（再深一层的 inline mod 也会递归）。
+默认 cargo-reorder 会递归进入 inline `mod foo { ... }`,用同一套规则处理它的 body(再深一层的 inline mod 也会递归)。加 `--no-reorder-inline-mods` 之后只排**文件顶层**的 item,所有 inline mod 的 body 保持字节不动。
 
 **有意跳过**的三种 mod —— 它们的 item 顺序属于公共契约或影响编译语义：
 

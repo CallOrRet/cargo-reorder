@@ -119,13 +119,13 @@ struct Cli {
     #[arg(long)]
     struct_before_trait: bool,
 
-    /// Recurse into inline `mod foo { ... }` blocks and reorder their
-    /// bodies with the same rules. Off by default. Skips `#[cfg(test)]`
-    /// mods, `#[macro_use]` mods, and pure-`use` mods (prelude /
-    /// __private / sealed re-export shims) where the listing order is
-    /// part of the contract.
+    /// Skip recursing into inline `mod foo { ... }` blocks. By default
+    /// inline mod bodies are reordered with the same rules. Test mods
+    /// (`#[cfg(test)]`), `#[macro_use]` mods, and pure-`use` mods
+    /// (prelude / __private / sealed re-export shims) are always
+    /// skipped because their listing order is part of the contract.
     #[arg(long)]
-    reorder_inline_mods: bool,
+    no_reorder_inline_mods: bool,
 
     /// Skip files whose paths contain any of these substrings.
     #[arg(long)]
@@ -150,7 +150,7 @@ impl Cli {
             tests_last: !self.no_tests_last,
             pub_mod_first: self.pub_mod_first,
             struct_before_trait: self.struct_before_trait,
-            reorder_inline_mods: self.reorder_inline_mods,
+            reorder_inline_mods: !self.no_reorder_inline_mods,
         }
     }
 }
