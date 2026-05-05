@@ -20,6 +20,17 @@ path = "src/main.rs"
 name = "cargo_reorder"
 path = "src/lib.rs"
 
+[package.metadata.binstall]
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 anyhow      = { version = "1" }
 clap        = { version = "4", features = ["derive"] }

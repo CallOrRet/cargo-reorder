@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest      # x86_64-unknown-linux-gnu
+          - ubuntu-24.04-arm   # aarch64-unknown-linux-gnu
+          - macos-13           # x86_64-apple-darwin
+          - macos-latest       # aarch64-apple-darwin
+          - windows-latest     # x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --locked
+      - run: cargo test --all-features --locked
+
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove rust-toolchain.toml
+        run: rm -f rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+
+  lints:
+    name: clippy + rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked
