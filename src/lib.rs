@@ -29,6 +29,7 @@ pub mod diagnostic;
 pub mod discover;
 
 mod emit;
+mod fields;
 mod frontmatter;
 mod imports;
 mod macros;

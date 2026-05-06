@@ -246,6 +246,16 @@ pub struct Config {
     /// Disable ordering shorter trait paths first
     /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
     pub no_short_trait_path_first: bool,
+    /// Disable reordering named fields inside `struct` / `union` /
+    /// `enum` (and inside enum variants). When on, fields are grouped
+    /// by their snake_case / PascalCase / camelCase first word, within
+    /// each group sorted shortest-name-first, and the groups are
+    /// emitted in ascending order of the group's mean name length
+    /// with a blank line between them. ABI- and semantics-affecting
+    /// shapes are always skipped: any `#[repr(...)]`, any
+    /// `#[derive(PartialOrd | Ord)]`, enums whose any variant carries
+    /// an explicit discriminant, and tuple/unit variants.
+    pub no_reorder_fields: bool,
 }
 
 pub(crate) struct Block {
@@ -562,6 +572,11 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
             String::new()
         };
         let body = take_lines(&lines, start, end);
+        let body = if !cfg.no_reorder_fields {
+            crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+        } else {
+            body
+        };
         let category = Category::classify(item);
         let import_group = match item {
             Item::Use(u) => Some(ImportGroup::classify(u, &local_mods)),

@@ -138,6 +138,16 @@ struct Cli {
     #[arg(long)]
     no_short_trait_path_first: bool,
 
+    /// Disable reordering named fields inside `struct` / `union` /
+    /// `enum`. By default, fields are grouped by their first word
+    /// (snake_case `_` separator or PascalCase / camelCase boundary);
+    /// within each group sorted shortest-first; groups emitted in
+    /// ascending order of the group's mean name length with a blank
+    /// line between them. ABI- and semantics-affecting shapes are
+    /// always skipped (see README).
+    #[arg(long)]
+    no_reorder_fields: bool,
+
     /// Skip files whose paths contain any of these substrings.
     #[arg(long)]
     exclude: Vec<String>,
@@ -163,6 +173,7 @@ impl Cli {
             no_tests_last: self.no_tests_last,
             no_reorder_inline_mods: self.no_reorder_inline_mods,
             no_short_trait_path_first: self.no_short_trait_path_first,
+            no_reorder_fields: self.no_reorder_fields,
         }
     }
 }

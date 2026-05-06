@@ -251,6 +251,7 @@ Grouped by function.
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
 | `--no-reorder-inline-mods` | don't reorder bodies of inline `mod foo { ... }` blocks (see "On `--no-reorder-inline-mods`" below) |
 | `--no-short-trait-path-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
+| `--no-reorder-fields` | preserve source order of named fields inside `struct` / `union` / `enum` (default groups them by snake_case / PascalCase prefix and sorts shortest-first within each group, see "On `--no-reorder-fields`" below) |
 
 ### Output mode
 
@@ -431,6 +432,59 @@ wins its internal majority, ties counted separately): **14/20
 trait-first (70%), 3/20 struct-first (15%), 3/20 tied (15%)**.
 Strongly trait-first. Default is trait-first; pass
 `--no-trait-before-struct` if your project bucks this pattern.
+
+## On `--no-reorder-fields`
+
+By default cargo-reorder also rearranges the **named fields** inside
+each `struct` / `union`, the named fields inside each struct-like
+enum variant, and the variants of each `enum`. The rules:
+
+1. **Group** by the identifier's first "word":
+   - For snake_case: text up to the first `_` (`foo_bar` → `foo`).
+   - For PascalCase / camelCase: text up to the first
+     lowercase→uppercase boundary (`FooBar` → `Foo`,
+     `fooBar` → `foo`). Names with no boundary at all
+     (`Foo`, `BAR`, `XMLParser`) are their own one-element group.
+2. **Within a group**: sort by name length, shortest first
+   (`bar_x` before `bar_long_name`). Ties preserve source order.
+3. **Between groups**: order ascending by the group's **mean
+   name length** (sum of all member names' lengths / member count).
+   Ties preserve source order.
+4. A **blank line** separates consecutive groups; within a group
+   fields stay packed together.
+
+Worked example (input on the left, output on the right):
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+Pass `--no-reorder-fields` to disable the pass entirely (the
+top-level item reorder still runs, just the inside of each
+`struct` / `union` / `enum` is left exactly as written).
+
+The pass automatically **skips** any item whose layout or derived
+semantics would change with reordering:
+
+| Pattern | Why we skip |
+| --- | --- |
+| Any `#[repr(...)]` (C, packed, transparent, align(N), int reprs) | reordering would change ABI / memory layout |
+| `#[derive(Ord)]` or `#[derive(PartialOrd)]` | derived comparison reads fields/variants in source order |
+| `enum` with any explicit discriminant (`A = 1`) | reordering silently shifts the implicit values for the rest |
+| Tuple struct / tuple variant / unit struct / unit variant | no field names to group on |
+| Single-line layouts (`struct S { a: u8, b: u8 }`) | line-based slicing can't disentangle them — left intact |
+| Fewer than 2 fields | nothing to sort |
+
+These skips are conservative on purpose: the goal is "field
+reorder is always safe to apply with default settings". If your
+codebase has a case we should also skip, open an issue.
 
 ## On `--no-reorder-inline-mods`
 

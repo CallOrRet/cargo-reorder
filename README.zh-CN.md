@@ -204,6 +204,7 @@ mod tests {
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
 | `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
 | `--no-short-trait-path-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
+| `--no-reorder-fields` | 不对 `struct` / `union` / `enum` 内部的具名字段做"前缀分组+长度排序"（默认开启，见「关于 `--no-reorder-fields`」） |
 
 ### 输出模式
 
@@ -328,6 +329,46 @@ cargo build --release --bin sample-stats
 | tracing | 12 | 7 | 0 |
 
 按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--no-trait-before-struct`。
+
+## 关于 `--no-reorder-fields`
+
+默认情况下 cargo-reorder 不只动顶层 item，还会对**每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段**做分组排序：
+
+1. **按"首词"分组**：
+   - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
+   - PascalCase / camelCase：取第一个小写→大写的转折之前（`FooBar` → `Foo`，`fooBar` → `foo`）
+   - 没有 `_` 也没有大小写转折的（`Foo`、`BAR`、`XMLParser`）自成一组
+2. **组内**按名字长度升序，短的在前（`bar_x` 在 `bar_long_name` 之前），同长度按原顺序
+3. **组间**按**该组的平均名字长度**升序（所有成员名字长度的算数平均），同长度按原顺序
+4. 不同组之间插入**一个空行**，组内字段紧贴
+
+示例（左为输入，右为输出）：
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+加 `--no-reorder-fields` 关掉这一遍（顶层 item 仍然排序，只是每个 `struct` / `union` / `enum` 的内部保持原样）。
+
+工具会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
+
+| 模式 | 跳过原因 |
+| --- | --- |
+| 任何 `#[repr(...)]`（C、packed、transparent、align(N)、整型 repr） | 重排会改 ABI / 内存布局 |
+| `#[derive(Ord)]` 或 `#[derive(PartialOrd)]` | 派生比较按字段/变体声明顺序读 |
+| `enum` 任一变体带显式 discriminant（`A = 1`） | 重排会无声修改其它变体的隐式值 |
+| 元组 struct / 元组变体 / 单元 struct / 单元变体 | 没有字段名可分组 |
+| 单行布局（`struct S { a: u8, b: u8 }`） | 行级切片无法干净地分离它们，保持原样 |
+| 字段数 < 2 | 没东西可排 |
+
+这些跳过规则故意写得保守，目标是"默认开启字段重排始终是安全的"。如果你的代码里发现还有该跳过的场景，请提 issue。
 
 ## 关于 `--no-reorder-inline-mods`
 
