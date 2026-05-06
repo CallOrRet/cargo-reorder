@@ -1,8 +1,9 @@
 //! Coverage for inline-mod reordering. Default ON: bodies are
 //! reordered with the same rules, except for the documented skip
 //! list (test mods, `#[macro_use]`, pure-`use` mods). With
-//! `--no-reorder-inline-mods` (i.e. `Config { reorder_inline_mods:
-//! false }`), inline mod bodies stay byte-identical to the source.
+//! `--no-reorder-inline-mods` (i.e. `Config { no_reorder_inline_mods:
+//! true, ..default() }`), inline mod bodies stay byte-identical to
+//! the source.
 
 use std::env;
 use std::fs;
@@ -44,10 +45,9 @@ impl Drop for TempDir {
 }
 
 fn cfg_recurse() -> Config {
-    Config {
-        reorder_inline_mods: true,
-        ..Config::default()
-    }
+    // Inline-mod recursion is the default now; this helper exists only
+    // so the test names stay self-documenting.
+    Config::default()
 }
 
 #[test]
@@ -60,7 +60,7 @@ mod inner {
 }
 ";
     let cfg = Config {
-        reorder_inline_mods: false,
+        no_reorder_inline_mods: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -126,10 +126,10 @@ mod outer {
     let p_outer_use = out.find("use std::fmt").unwrap();
     let p_inner_mod = out.find("mod inner").unwrap();
     let p_outer_fn = out.find("fn at_outer").unwrap();
-    // Outer body canonicalised: use < mod < fn (default use-first +
-    // mod-after-imports + fn-late).
+    // Outer body canonicalised: mod < use < fn (default mod-first +
+    // use-after-mods + fn-late).
     assert!(
-        p_outer_use < p_inner_mod && p_inner_mod < p_outer_fn,
+        p_inner_mod < p_outer_use && p_outer_use < p_outer_fn,
         "outer body order:\n{out}"
     );
     let p_inner_use = out.find("use core::cmp::Ord").unwrap();
@@ -349,10 +349,7 @@ fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
 "#,
     );
     let src = fs::read_to_string(&lib).unwrap();
-    let cfg = Config {
-        reorder_inline_mods: true,
-        ..Config::default()
-    };
+    let cfg = Config::default();
     let out = reorder_source_with_path(&src, Some(&lib), &cfg).unwrap();
     let p_macro = out.find("macro_rules! m").unwrap();
     let p_mod = out.find("pub mod bar").unwrap();
@@ -384,10 +381,7 @@ pub mod foo {
 "#,
     );
     let src = fs::read_to_string(&lib).unwrap();
-    let cfg = Config {
-        reorder_inline_mods: true,
-        ..Config::default()
-    };
+    let cfg = Config::default();
     let out = reorder_source_with_path(&src, Some(&lib), &cfg).unwrap();
     let p_macro = out.find("macro_rules! m").unwrap();
     let p_mod = out.find("pub mod bar").unwrap();
@@ -406,8 +400,7 @@ mod inner {
 }
 ";
     let cfg = Config {
-        reorder_inline_mods: true,
-        struct_before_trait: true,
+        no_trait_before_struct: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();

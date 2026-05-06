@@ -10,16 +10,16 @@ to the variant your project prefers.
 ## Default order
 
 1. `extern crate` declarations
-2. `use` imports — three groups separated by a blank line:
+2. `mod` declarations  *(see `--no-mod-before-use` below to flip with `use`)*
+3. `use` imports — three groups separated by a blank line:
    - **std**: `std` / `core` / `alloc`
    - **external**: third-party crates
    - **crate-local**: `crate` → `super` → `self` → local-mod (no blank line inside this block; "local-mod" = a `use foo::...` whose first segment matches a `mod foo;` in the same file)
-3. `pub use` re-exports (same grouping)
-4. `mod` declarations  *(see `--mod-before-use` below for the minority convention of putting `mod` before `use`)*
+4. `pub use` re-exports (same grouping)
 5. `const` items
 6. `static` items
 7. type aliases (`type X = ...`)
-8. `trait`s — each followed by its `impl Trait for X` blocks where `X` is not declared in this file (so the impl anchors on the trait instead). *(Use `--struct-before-trait` to swap with #9 / #10.)*
+8. `trait`s — each followed by its `impl Trait for X` blocks where `X` is not declared in this file (so the impl anchors on the trait instead). *(Use `--no-trait-before-struct` to swap with #9 / #10.)*
 9. `enum`s — each followed by its own `impl` blocks
 10. `struct`s / `union`s — each followed by its own `impl` blocks
 11. unanchored `impl` blocks — neither the target type nor the trait is declared in this file (e.g. an impl in `submod.rs` whose target lives in `lib.rs`)
@@ -147,6 +147,9 @@ verbatim by piping the input above through the binary):
 
 extern crate alloc;
 
+mod helpers;
+pub mod public_api;
+
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -158,9 +161,6 @@ use helpers::Helper;
 pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
-
-mod helpers;
-pub mod public_api;
 
 const MAX: u32 = 100;
 
@@ -206,7 +206,9 @@ Things to notice:
 * `//! crate docs` and `#![allow(dead_code)]` stay at the top — file-level
   trivia is never reshuffled.
 * `extern crate alloc;` lands first, separated by a blank line from
-  the `use` block.
+  the rest.
+* `mod` declarations come next (default is mod-first; pass
+  `--no-mod-before-use` to flip).
 * `use` is split into three visually distinct groups (std / external /
   crate-local) with blank lines between them. Inside the third group
   the order is `crate` → `super` → `self` → local-mod (`helpers`,
@@ -241,9 +243,9 @@ Grouped by function.
 
 | Flag | Effect |
 | --- | --- |
-| `--pub-mod-first` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--pub-mod-first`" below) |
-| `--mod-before-use` | put `mod` before `use` (minority convention; see "On `--mod-before-use`" below) |
-| `--struct-before-trait` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--struct-before-trait`" below) |
+| `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
+| `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
+| `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
 | `--no-import-groups` | don't split imports into std / external / crate |
 | `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
@@ -313,7 +315,7 @@ observations. There are no flags — every observation rule
 (test-mod skipping, inline-mod recursion, visibility handling)
 is fixed by the source.
 
-## On `--pub-mod-first`
+## On `--no-preserve-mod-order`
 
 Counting scopes that contain BOTH a `pub mod foo;` and a private
 `mod foo;` declaration (external declarations only, not inline
@@ -348,14 +350,15 @@ pub-first (53%), 5/19 priv-first (26%), 4/19 tied (21%)**.
 Slight pub-first lean. Default still keeps the relative order from
 the source — turning the flip on by default would silently shuffle
 files for the ~26% of projects that lean priv-first plus the ~21%
-that are split. Pass `--pub-mod-first` if your project follows the
+that are split. Pass `--no-preserve-mod-order` if your project follows the
 majority pattern.
 
-## On `--mod-before-use`
+## On `--no-mod-before-use`
 
 There is **no official rule** about whether `mod` or `use` comes
-first. Counting scopes that contain both an external `mod foo;`
-declaration and a `use ...;` — 618 scopes across the 21 projects
+first; rustfmt is silent on this. Counting scopes that contain both
+an external `mod foo;` declaration and a `use ...;` — 618 scopes
+across the 21 projects
 (inline `mod foo { ... }` blocks don't count as `mod` declarations
 for this comparison; their bodies are sampled separately as their
 own scopes):
@@ -389,13 +392,12 @@ pair-majority for use-first / mod-first / tied):
 
 Aggregate by project (each project votes once for whichever side
 wins its internal majority, ties counted separately): **7/21 use-first
-(33%), 12/21 mod-first (57%), 2/21 tied (10%)**. The data now leans
-mod-first under pair-majority semantics. Default is still use-first
-(matches `rustfmt`-style imports-on-top community guidance and
-preserves output stability for users on this default); pass
-`--mod-before-use` to flip.
+(33%), 12/21 mod-first (57%), 2/21 tied (10%)**. The default is
+**mod-first** to match this majority. Pass `--no-mod-before-use` if
+your project is on the use-first side (notably `regex`, `ripgrep`,
+`cargo`, `chrono`, `tracing`, `rayon`, `reqwest`).
 
-## On `--struct-before-trait`
+## On `--no-trait-before-struct`
 
 Counting `trait` vs `struct` / `enum` / `union` declarations in
 scopes that have both — 455 scopes across 20 of the 21 projects
@@ -428,7 +430,7 @@ Aggregate by project (each project votes once for whichever side
 wins its internal majority, ties counted separately): **14/20
 trait-first (70%), 3/20 struct-first (15%), 3/20 tied (15%)**.
 Strongly trait-first. Default is trait-first; pass
-`--struct-before-trait` if your project bucks this pattern.
+`--no-trait-before-struct` if your project bucks this pattern.
 
 ## On `--no-reorder-inline-mods`
 

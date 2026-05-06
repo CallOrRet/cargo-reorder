@@ -143,9 +143,9 @@ impl Category {
         }
     }
 
-    /// Sort weight, depending on user config (mod-before-use vs use-first).
+    /// Sort weight. Default mod-first; `no_mod_before_use` flips to use-first.
     fn weight(self, cfg: &Config) -> u32 {
-        let use_first = !cfg.mod_before_use;
+        let use_first = cfg.no_mod_before_use;
         match self {
             Category::ExternCrate => 0,
             Category::Mod => {
@@ -175,7 +175,7 @@ impl Category {
             Category::Enum => 50,
             Category::Struct => 51,
             Category::Trait => {
-                if cfg.struct_before_trait {
+                if cfg.no_trait_before_struct {
                     60
                 } else {
                     49
@@ -214,48 +214,38 @@ enum ImportOrigin {
     Crate,
 }
 
-/// User-tunable behaviour. See README for the rationale on each flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// User-tunable behaviour. Every field defaults to `false`; opting *in*
+/// to a non-default behaviour is always `field = true`. The CLI maps each
+/// field one-to-one to a `--<field-name>` flag (no `ArgAction::SetFalse`
+/// indirection). See README for the rationale on each flag.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// `mod foo;` before `use`. Minority convention; see README.
-    pub mod_before_use: bool,
-    /// Split imports into std / external / crate-local groups.
-    pub group_imports: bool,
-    /// `impl` blocks follow their target type, ordered
-    /// inherent → std trait → external trait.
-    pub group_impls_with_type: bool,
-    /// Force `#[cfg(test)] mod ...` to the end of the file.
-    pub tests_last: bool,
-    /// Sort `pub mod` before `mod` with a blank line between.
-    pub pub_mod_first: bool,
-    /// Sort `enum` / `struct` before `trait`. Default off (trait-first
-    /// matches the slight majority in real-world Rust files — see README).
-    pub struct_before_trait: bool,
-    /// Recurse into inline `mod foo { ... }` blocks and reorder their bodies
-    /// with the same rules. On by default — see README for the skip list
-    /// (test mods, `#[macro_use]` mods, pure-`use` mods).
-    pub reorder_inline_mods: bool,
-    /// When two trait `impl` blocks share the same anchor and trait
-    /// classification (e.g. `impl Debug for Foo` and
-    /// `impl std::fmt::Debug for Foo`), order the shorter trait path
-    /// first. On by default — matches the convention that the unqualified
-    /// form goes before its fully-qualified equivalent.
-    pub short_trait_path_first: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            mod_before_use: false,
-            group_imports: true,
-            group_impls_with_type: true,
-            tests_last: true,
-            pub_mod_first: false,
-            struct_before_trait: false,
-            reorder_inline_mods: true,
-            short_trait_path_first: true,
-        }
-    }
+    /// Disable putting `mod foo;` before `use ...;`. Default is
+    /// mod-first — matches the majority pattern in our 21-project
+    /// sample (12/21 mod-first vs 7/21 use-first); see README.
+    pub no_mod_before_use: bool,
+    /// Disable preserving `pub mod` / `mod` source order. With this
+    /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
+    /// blank-line separator between them.
+    pub no_preserve_mod_order: bool,
+    /// Disable putting `trait` ahead of `enum` / `struct` / `union`.
+    /// Default is trait-first — matches the majority in our sample
+    /// (14/20 trait-first; see README).
+    pub no_trait_before_struct: bool,
+    /// Disable splitting imports into std / external / crate-local groups.
+    pub no_import_groups: bool,
+    /// Disable anchoring `impl` blocks to their target type
+    /// (inherent → std trait → external trait).
+    pub no_impl_grouping: bool,
+    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
+    pub no_tests_last: bool,
+    /// Disable recursing into inline `mod foo { ... }` blocks.
+    /// See README for the skip list (test mods, `#[macro_use]` mods,
+    /// pure-`use` mods) — those are always skipped regardless.
+    pub no_reorder_inline_mods: bool,
+    /// Disable ordering shorter trait paths first
+    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
+    pub no_short_trait_path_first: bool,
 }
 
 pub(crate) struct Block {
@@ -427,7 +417,7 @@ pub fn reorder_source_with_path(
 }
 
 /// Internal entry point. Recurses into itself for cargo-script
-/// frontmatter stripping and (when `cfg.reorder_inline_mods` is on)
+/// frontmatter stripping and (when `!cfg.no_reorder_inline_mods` is on)
 /// for inline `mod foo { ... }` body recursion.
 fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // Cargo-script: strip frontmatter, reorder body, stitch back.
@@ -442,7 +432,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // process top-level inline mods here. We then re-parse the rewritten
     // source so the rest of the pipeline sees the canonicalised bodies.
     let owned: String;
-    let working: &str = if cfg.reorder_inline_mods {
+    let working: &str = if !cfg.no_reorder_inline_mods {
         owned = recurse_inline_mods(source, cfg)?;
         &owned
     } else {
@@ -693,13 +683,13 @@ fn compute_sort_key(
     };
 
     // `#[cfg(test)] mod tests` always last (unless disabled).
-    let primary = if !cfg.tests_last && category == Category::TestMod {
+    let primary = if cfg.no_tests_last && category == Category::TestMod {
         Category::Mod.weight(cfg)
     } else {
         category.weight(cfg)
     };
 
-    if cfg.group_impls_with_type {
+    if !cfg.no_impl_grouping {
         if let Item::Impl(im) = item {
             // Try to anchor on the Self type (e.g. `impl X for Foo` -> Foo).
             let anchor = type_last_segment(&im.self_ty)
@@ -722,7 +712,7 @@ fn compute_sort_key(
                     scope.local_traits,
                 ),
             };
-            let trait_path_len = if cfg.short_trait_path_first {
+            let trait_path_len = if !cfg.no_short_trait_path_first {
                 im.trait_
                     .as_ref()
                     .map(|(_, p, _)| p.segments.len().min(u8::MAX as usize) as u8)
@@ -771,9 +761,9 @@ fn compute_sort_key(
     // `import_group` field on SortKey is reused as a generic "secondary sort
     // bucket within a category". For Use it is the std/ext/crate-local index;
     // for Mod with `pub_mod_first` it is 0=pub, 1=private; otherwise 0.
-    let subgroup = if cfg.group_imports && import_group.is_some() {
+    let subgroup = if !cfg.no_import_groups && import_group.is_some() {
         import_group_byte
-    } else if cfg.pub_mod_first && category == Category::Mod {
+    } else if cfg.no_preserve_mod_order && category == Category::Mod {
         match mod_is_pub {
             Some(true) => 0,
             Some(false) | None => 1,

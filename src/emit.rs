@@ -57,10 +57,10 @@ fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
     if already_blank {
         return false;
     }
-    if cfg.group_imports && import_boundary(p, blk) {
+    if !cfg.no_import_groups && import_boundary(p, blk) {
         return true;
     }
-    if cfg.pub_mod_first && pub_mod_boundary(p, blk) {
+    if cfg.no_preserve_mod_order && pub_mod_boundary(p, blk) {
         return true;
     }
     false

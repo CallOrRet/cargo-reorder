@@ -9,17 +9,17 @@
 ## 默认排序
 
 1. `extern crate` 声明
-2. `use` import —— 分三组，组间空一行：
+2. `mod` 声明 *（用 `--no-mod-before-use` 把 `use` 提到 `mod` 前面，见下文）*
+3. `use` import —— 分三组，组间空一行：
    - **std**：`std` / `core` / `alloc`
    - **external**：第三方 crate
    - **crate-local**：`crate` → `super` → `self` → local-mod
      （local-mod 指 `use foo::...` 的首段名字匹配本文件里的 `mod foo;`；这一组内部不再插空行）
-3. `pub use` re-export（同样的三组细分）
-4. `mod` 声明 *（可用 `--mod-before-use` 切换到「mod 在 use 之前」的少数派写法，见下文）*
+4. `pub use` re-export（同样的三组细分）
 5. `const`
 6. `static`
 7. 类型别名 `type X = ...`
-8. `trait` —— 紧跟那些目标类型不在本文件里的 `impl Trait for X`（`X` 不本地，所以 impl 锚定到 trait 而不是 type）。**（用 `--struct-before-trait` 与 #9 / #10 互换位置。）**
+8. `trait` —— 紧跟那些目标类型不在本文件里的 `impl Trait for X`（`X` 不本地，所以 impl 锚定到 trait 而不是 type）。**（用 `--no-trait-before-struct` 与 #9 / #10 互换位置。）**
 9. `enum` —— 紧跟它的 `impl` 块
 10. `struct` / `union` —— 紧跟它的 `impl` 块
 11. 无锚点 `impl` —— target 类型和 trait 都不在本文件 name_index 里（比如 `submod.rs` 实现的 impl，目标 type 定义在 `lib.rs`；不是 Rust 「孤儿」语义，是 parser 一次只看一个文件造成的）
@@ -113,6 +113,9 @@ extern crate alloc;
 
 extern crate alloc;
 
+mod helpers;
+pub mod public_api;
+
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -124,9 +127,6 @@ use helpers::Helper;
 pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
-
-mod helpers;
-pub mod public_api;
 
 const MAX: u32 = 100;
 
@@ -170,7 +170,8 @@ mod tests {
 要点：
 
 * `//! crate docs` 和 `#![allow(dead_code)]` 留在文件最顶部 —— 文件级的内容永远不会被打乱。
-* `extern crate alloc;` 排到最前面，和 `use` 块之间空一行。
+* `extern crate alloc;` 排到最前面，和后续之间空一行。
+* `mod` 声明紧跟其后（默认 mod 在前；加 `--no-mod-before-use` 翻转）。
 * `use` 拆成 std / external / crate-local 三个视觉组，组间空行。第三组内部按 `crate` → `super` → `self` → local-mod 的顺序；这里 `helpers` 因为有同文件里的 `mod helpers;` 声明，被识别为 local-mod。
 * `pub use` 同样按这套子分组，但单独成一块，紧跟在 `use` 之后。
 * 这个示例里没有 `macro_rules!`。如果有,每个宏 item 都会作为 barrier(见下文「宏 item 是硬 barrier」),会把周围的排序切成独立的"barrier 之上 / barrier 之下"两段。
@@ -195,9 +196,9 @@ mod tests {
 
 | 参数 | 作用 |
 | --- | --- |
-| `--pub-mod-first` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--pub-mod-first`」） |
-| `--mod-before-use` | `mod` 排在 `use` 之前（少数派写法，见「关于 `--mod-before-use`」） |
-| `--struct-before-trait` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--struct-before-trait`」） |
+| `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
+| `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
+| `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
 | `--no-import-groups` | 不分 std / external / crate 三组 |
 | `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
@@ -241,7 +242,7 @@ cargo build --release --bin sample-stats
 
 每个目录下所有 `.rs` 文件都用 `syn::parse_file` 解析。目录层面跳过：`target/`、`.git/`，以及惯例上的非库目录 `tests/`、`examples/`、`benches/` —— 它们走集成测试那套约定（`mod common;` 共享 helper、derive-UI 用的临时 struct、bench 一次性代码），并不反映项目库源码的真实组织风格。parse 失败的文件在 stderr 那行的 `parse-skipped` 里计数，不参与观察。**没有任何 flag** —— 所有观察规则（跳过 test mod、递归 inline mod、可见性识别）都写死在源码里。
 
-## 关于 `--pub-mod-first`
+## 关于 `--no-preserve-mod-order`
 
 每个 scope 用 pair-majority 投票：把 (pub mod, priv mod) 所有配对枚举一遍，看是 pub 在前还是 priv 在前更多——21 个项目里有 19 个有合资格的 scope：
 
@@ -267,11 +268,11 @@ cargo build --release --bin sample-stats
 | tower | 7 | 3 | 0 |
 | tracing | 4 | 3 | 0 |
 
-按项目聚合（每个项目按其内部多数投一票，平局单独计）：**10/19 pub-first (53%)，5/19 priv-first (26%)，4/19 tied (21%)**。略偏 pub-first。默认仍保留源序 —— 默认开启会让那些偏 priv-first 的项目（约 26%）和持平项目（约 21%）的输出无声变化。项目内部偏 pub-first 时再加 `--pub-mod-first`。
+按项目聚合（每个项目按其内部多数投一票，平局单独计）：**10/19 pub-first (53%)，5/19 priv-first (26%)，4/19 tied (21%)**。略偏 pub-first。默认仍保留源序 —— 默认开启会让那些偏 priv-first 的项目（约 26%）和持平项目（约 21%）的输出无声变化。项目内部偏 pub-first 时再加 `--no-preserve-mod-order`。
 
-## 关于 `--mod-before-use`
+## 关于 `--no-mod-before-use`
 
-**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 21 个项目共 618 个 scope。每个 scope 用 pair-majority 投票（数对 (mod, use) 中谁在前的多数胜出，平局算 tied）：
+**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**——rustfmt 也没立场。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 21 个项目共 618 个 scope。每个 scope 用 pair-majority 投票（数对 (mod, use) 中谁在前的多数胜出，平局算 tied）：
 
 | 项目 | use-first | mod-first | tied |
 | --- | --: | --: | --: |
@@ -297,9 +298,9 @@ cargo build --release --bin sample-stats
 | tower | 2 | 22 | 1 |
 | tracing | 15 | 7 | 1 |
 
-按项目聚合（每个项目按内部多数投一票，平局单独计）：**7/21 use-first (33%)，12/21 mod-first (57%)，2/21 tied (10%)**。pair-majority 语义下数据偏 mod-first。默认仍保持 use-first（与 `rustfmt` 风格的 imports-on-top 共识一致，且对已用此默认的用户输出稳定）；要翻转加 `--mod-before-use`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**7/21 use-first (33%)，12/21 mod-first (57%)，2/21 tied (10%)**。**默认按多数走，mod 在前**。项目内部偏 use-first 时（典型如 `regex`、`ripgrep`、`cargo`、`chrono`、`tracing`、`rayon`、`reqwest`）加 `--no-mod-before-use`。
 
-## 关于 `--struct-before-trait`
+## 关于 `--no-trait-before-struct`
 
 统计同时含 `trait` 和 `struct` / `enum` / `union` 声明的 scope —— 21 个项目里有 20 个有合资格的 scope。每个 scope 用 pair-majority 投票：
 
@@ -326,7 +327,7 @@ cargo build --release --bin sample-stats
 | tower | 10 | 2 | 0 |
 | tracing | 12 | 7 | 0 |
 
-按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--struct-before-trait`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--no-trait-before-struct`。
 
 ## 关于 `--no-reorder-inline-mods`
 

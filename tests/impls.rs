@@ -242,7 +242,7 @@ impl std::default::Default for Foo { fn default() -> Self { Foo } }
 impl Default for Foo { fn default() -> Self { Foo } }
 ";
     let cfg = Config {
-        short_trait_path_first: false,
+        no_short_trait_path_first: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();

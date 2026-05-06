@@ -8,13 +8,13 @@
 //! bucket.
 //!
 //! 1. mod-vs-use — among (`mod foo;`, `use ...;`) pairs, does the
-//!    majority have mod before use? (Drives `--mod-before-use` stats.)
+//!    majority have mod before use? (Drives `--no-mod-before-use` stats.)
 //! 2. pub/priv mod — among (`pub mod foo;`, `mod foo;`) pairs, does
 //!    the majority have `pub mod` before private `mod`? (Drives
-//!    `--pub-mod-first` stats.)
+//!    `--no-preserve-mod-order` stats.)
 //! 3. trait-vs-struct — among (`trait`, `struct`/`enum`/`union`) pairs,
 //!    does the majority have trait before the type? (Drives
-//!    `--struct-before-trait` stats.)
+//!    `--no-trait-before-struct` stats.)
 //!
 //! A "scope" is the file's top level OR the body of an inline
 //! `mod foo { ... }`. Inline mods become their own observations so an

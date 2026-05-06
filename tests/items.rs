@@ -249,9 +249,10 @@ extern crate alloc;
     let out = reorder_source(input).unwrap();
     let want = [
         "extern crate alloc",
+        // mod-first default: mod (10) < use (31) < pub use (32).
+        "mod child;",
         "use serde::Serialize",
         "pub use crate::reexport::Foo",
-        "mod child;",
         "const KAY",
         "static SVAR",
         "type Alias",

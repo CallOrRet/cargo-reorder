@@ -56,7 +56,7 @@ EXAMPLES:
   cargo-reorder --all               reorder every workspace member
   cargo-reorder -p foo -p bar       reorder only the named packages
   cargo-reorder --check             CI mode: diff + exit 1 if changes
-  cargo-reorder --mod-before-use    put mod declarations before use
+  cargo-reorder --no-mod-before-use put use declarations before mod
   cargo-reorder src/lib.rs          reorder a single file
   cargo-reorder < a.rs > b.rs       filter mode (piped stdin)
 "
@@ -87,12 +87,14 @@ struct Cli {
     #[arg(long, conflicts_with = "check")]
     stdout: bool,
 
-    /// Place `mod foo;` declarations before `use`. This is a minority
-    /// convention (~23% of files in a sample of tokio/serde/ripgrep/clap/
-    /// syn/cargo) sometimes preferred for "declare structure first" clarity
-    /// and as a Rust 2015 carry-over. Default is use-first.
+    /// Disable putting `mod foo;` before `use ...;` (i.e., switch to
+    /// use-first). Default is mod-first because the pair-majority
+    /// sample of 21 real-world crates leans 12-vs-7 toward mod-first
+    /// (see README). Pass this flag if your project is on the
+    /// use-first side (notably `regex`, `ripgrep`, `cargo`, `chrono`,
+    /// `tracing`).
     #[arg(long)]
-    mod_before_use: bool,
+    no_mod_before_use: bool,
 
     /// Disable splitting `use` items into std / external / crate groups.
     #[arg(long)]
@@ -106,18 +108,21 @@ struct Cli {
     #[arg(long)]
     no_tests_last: bool,
 
-    /// Sort `pub mod foo;` before `mod foo;` and insert a blank line between
-    /// the two groups. Off by default — empirically ~62% of real-world files
-    /// keep `mod` and `pub mod` interleaved by topic rather than visibility.
+    /// Disable preserving `pub mod` / `mod` source order. With this
+    /// on, `pub mod` items are sorted before private `mod` items with
+    /// a blank line between the two groups. Default is to preserve
+    /// source order — empirically interleaved is the modal pattern
+    /// (11/19 projects in the README sample).
     #[arg(long)]
-    pub_mod_first: bool,
+    no_preserve_mod_order: bool,
 
-    /// Sort `enum` / `struct` before `trait`. Off by default — in a
-    /// 9-project sample of scopes that have both, ~87% are trait-first,
-    /// so trait-first is the default. Turn on for projects that
-    /// consistently put structs / enums first.
+    /// Disable putting `trait` ahead of `enum` / `struct` / `union`
+    /// (i.e., switch to struct-first). Default is trait-first — in
+    /// the 21-project sample 14/20 lean trait-first under
+    /// pair-majority. Pass this flag for projects that consistently
+    /// put structs / enums first.
     #[arg(long)]
-    struct_before_trait: bool,
+    no_trait_before_struct: bool,
 
     /// Skip recursing into inline `mod foo { ... }` blocks. By default
     /// inline mod bodies are reordered with the same rules. Test mods
@@ -150,14 +155,14 @@ struct Cli {
 impl Cli {
     fn config(&self) -> Config {
         Config {
-            mod_before_use: self.mod_before_use,
-            group_imports: !self.no_import_groups,
-            group_impls_with_type: !self.no_impl_grouping,
-            tests_last: !self.no_tests_last,
-            pub_mod_first: self.pub_mod_first,
-            struct_before_trait: self.struct_before_trait,
-            reorder_inline_mods: !self.no_reorder_inline_mods,
-            short_trait_path_first: !self.no_short_trait_path_first,
+            no_mod_before_use: self.no_mod_before_use,
+            no_preserve_mod_order: self.no_preserve_mod_order,
+            no_trait_before_struct: self.no_trait_before_struct,
+            no_import_groups: self.no_import_groups,
+            no_impl_grouping: self.no_impl_grouping,
+            no_tests_last: self.no_tests_last,
+            no_reorder_inline_mods: self.no_reorder_inline_mods,
+            no_short_trait_path_first: self.no_short_trait_path_first,
         }
     }
 }

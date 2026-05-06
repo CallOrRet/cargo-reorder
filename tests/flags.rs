@@ -4,25 +4,27 @@
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 #[test]
-fn default_is_use_first() {
+fn default_is_mod_before_use() {
+    // Default order puts `mod foo;` before `use ...;` — matches the
+    // pair-majority of the 21-project sample (12/21 mod-first).
     let input = "use std::fmt;\nmod child;\n";
     let out = reorder_source(input).unwrap();
     assert!(
-        out.find("use std::fmt").unwrap() < out.find("mod child").unwrap(),
+        out.find("mod child").unwrap() < out.find("use std::fmt").unwrap(),
         "{out}"
     );
 }
 
 #[test]
-fn mod_before_use_swaps() {
-    let input = "use std::fmt;\nmod child;\n";
+fn use_before_mod_flips_to_use_first() {
+    let input = "mod child;\nuse std::fmt;\n";
     let cfg = Config {
-        mod_before_use: true,
+        no_mod_before_use: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
     assert!(
-        out.find("mod child").unwrap() < out.find("use std::fmt").unwrap(),
+        out.find("use std::fmt").unwrap() < out.find("mod child").unwrap(),
         "{out}"
     );
 }
@@ -35,7 +37,7 @@ use serde::S;
 use std::fmt;
 ";
     let cfg = Config {
-        group_imports: false,
+        no_import_groups: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -57,7 +59,7 @@ struct Bar;
 impl Bar { fn b() {} }
 ";
     let cfg = Config {
-        group_impls_with_type: false,
+        no_impl_grouping: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -83,7 +85,7 @@ mod tests { #[test] fn t() {} }
 fn after() {}
 ";
     let cfg = Config {
-        tests_last: false,
+        no_tests_last: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -104,7 +106,7 @@ mod d;
 pub mod c;
 ";
     let cfg = Config {
-        pub_mod_first: true,
+        no_preserve_mod_order: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -175,7 +177,7 @@ fn default_is_trait_before_struct() {
 fn struct_before_trait_flag_swaps() {
     let input = "trait T {}\nstruct S;\n";
     let cfg = Config {
-        struct_before_trait: true,
+        no_trait_before_struct: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
