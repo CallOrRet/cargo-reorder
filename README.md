@@ -232,32 +232,38 @@ Grouped by function.
 
 ### Discovery scope (which files to process)
 
+The selection flags are intentionally a subset of `cargo fmt`'s — the
+same combination always produces the same file set. Direct file or
+directory arguments are not supported (cargo fmt doesn't accept them
+either): work at the package level instead.
+
 | Flag | Effect |
 | --- | --- |
 | `--all` | process every workspace member (matches `cargo fmt --all`) |
 | `-p`, `--package <NAME>` | process only the named package(s) (matches `cargo fmt -p NAME`); repeat for multiple |
 | `--manifest-path <PATH>` | use a specific `Cargo.toml` for discovery |
-| `--exclude <substr>` | skip files whose path contains the given substring |
 
 ### Item ordering policy
 
 | Flag | Effect |
 | --- | --- |
-| `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
-| `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
-| `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
-| `--no-import-groups` | don't split imports into std / external / crate |
-| `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
+| `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
+| `--no-import-groups` | don't split imports into std / external / crate |
+| `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
+| `--no-reorder-fields` | preserve source order of named fields inside `struct` / `union` / `enum` (default groups them by snake_case / PascalCase prefix and sorts shortest-first within each group, see "On `--no-reorder-fields`" below) |
+| `--no-reorder-impl-fns` | preserve source order of members inside every `impl` / `trait` body (covers `const` / `type` / `fn` / `async fn`); the field-level and top-level grouping still apply |
+| `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
 | `--no-reorder-inline-mods` | don't reorder bodies of inline `mod foo { ... }` blocks (see "On `--no-reorder-inline-mods`" below) |
+| `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
 | `--no-short-trait-path-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
 
 ### Output mode
 
 | Flag | Effect |
 | --- | --- |
+| `--fmt` | run `cargo fmt` (with the same `--all` / `-p` / `--manifest-path` you passed) before reordering. Skipped under `--check` so a CI gate doesn't write to disk. |
 | `--check` | exit 1 if any file would change (CI mode) |
-| `--stdout` | print to stdout instead of rewriting in place |
 | `-v`, `--verbose` | log every rewritten file (default mode is silent) |
 | `--color <auto\|always\|never>` | colour `--check` diffs (red `-`, green `+`, cyan header) and parse errors. Default `auto`: only when stderr is a tty and `NO_COLOR` is unset. |
 
@@ -432,6 +438,79 @@ trait-first (70%), 3/20 struct-first (15%), 3/20 tied (15%)**.
 Strongly trait-first. Default is trait-first; pass
 `--no-trait-before-struct` if your project bucks this pattern.
 
+## On `--no-reorder-fields`
+
+By default cargo-reorder applies the same grouping rule at **three
+levels**:
+
+- **Field-level**: named fields inside each `struct` / `union`,
+  named fields inside each struct-like enum variant, and the
+  variants of each `enum`.
+- **Top-level (within category)**: among consecutive top-level
+  `struct` / `union` / `enum` / `trait` / `fn` / `async fn` items,
+  same-category siblings are reordered by the same prefix-grouping +
+  length rules. An `impl` block follows whichever type it anchors
+  to, so `struct Foo` + `impl Foo` stays together when `Foo` moves.
+- **Inside `impl` and `trait` bodies**: members are sorted into the
+  same category order used at the top level — `const` → `type` →
+  `fn` → `async fn` — and within each category the prefix-group +
+  length rule applies. Macro / verbatim members are barriers: their
+  presence leaves the whole body verbatim.
+
+The rules in all three cases:
+
+1. **Group** by the identifier's first "word":
+   - For snake_case: text up to the first `_` (`foo_bar` → `foo`).
+   - For PascalCase / camelCase: text up to the first
+     lowercase→uppercase boundary (`FooBar` → `Foo`,
+     `fooBar` → `foo`). Names with no boundary at all
+     (`Foo`, `BAR`, `XMLParser`) are their own one-element group.
+2. **Within a group**: sort by name length, shortest first
+   (`bar_x` before `bar_long_name`). Ties preserve source order.
+3. **Between groups**: order ascending by the group's **mean
+   name length** (sum of all member names' lengths / member count).
+   Ties preserve source order.
+4. A **blank line** separates consecutive groups; within a group
+   fields stay packed together.
+
+Worked example (input on the left, output on the right):
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+Pass `--no-reorder-fields` to disable all three passes — top-level
+items fall back to category-then-source-order, the inside of each
+`struct` / `union` / `enum` is left exactly as written, and `impl` /
+`trait` bodies stay in source order. Pass the more targeted
+`--no-reorder-impl-fns` if you only want to keep `impl` / `trait`
+bodies in source order while keeping the other two passes on (e.g.
+when methods follow a deliberate sequence — builder chains,
+lifecycle order — but field grouping is still desirable).
+
+The field-level pass automatically **skips** any item whose layout
+or derived semantics would change with reordering:
+
+| Pattern | Why we skip |
+| --- | --- |
+| Any `#[repr(...)]` (C, packed, transparent, align(N), int reprs) | reordering would change ABI / memory layout |
+| `#[derive(Ord)]` or `#[derive(PartialOrd)]` | derived comparison reads fields/variants in source order |
+| `enum` with any explicit discriminant (`A = 1`) | reordering silently shifts the implicit values for the rest |
+| Tuple struct / tuple variant / unit struct / unit variant | no field names to group on |
+| Single-line layouts (`struct S { a: u8, b: u8 }`) | line-based slicing can't disentangle them — left intact |
+| Fewer than 2 fields | nothing to sort |
+
+These skips are conservative on purpose: the goal is "field
+reorder is always safe to apply with default settings". If your
+codebase has a case we should also skip, open an issue.
+
 ## On `--no-reorder-inline-mods`
 
 By default cargo-reorder recurses into inline `mod foo { ... }`
@@ -491,20 +570,20 @@ Comments and attributes are preserved:
 ## Usage
 
 ```shell
-# Rewrite files in place
-cargo-reorder src/
+# Reorder the current package
+cargo-reorder
 
-# Rewrite a single file
-cargo-reorder src/lib.rs
+# Reorder every member of a workspace
+cargo-reorder --all
 
-# Print to stdout instead of editing
-cargo-reorder --stdout src/lib.rs
-
-# Read from stdin / write to stdout
-cargo-reorder < input.rs > output.rs
+# Reorder only specific packages
+cargo-reorder -p foo -p bar
 
 # CI mode: exit 1 if anything would change
-cargo-reorder --check src/
+cargo-reorder --check --all
+
+# Run `cargo fmt` first, then reorder
+cargo-reorder --fmt --all
 ```
 
 ## Tested

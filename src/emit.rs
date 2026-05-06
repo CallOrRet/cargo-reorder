@@ -2,14 +2,17 @@
 //!
 //! The emit phase decides where to insert blank lines:
 //!
-//!   * **Import boundaries** (`group_imports = true`): a blank line goes
-//!     between consecutive import items in different `(category,
-//!     visual)` buckets, and between the last import and the first
-//!     non-import item. `crate` / `super` / `self` / `local-mod` share
-//!     one [`VisualGroup`] so they stay glued together.
+//!   * **Import boundaries** (default, off only with
+//!     `cfg.no_import_groups`): a blank line goes between consecutive
+//!     import items in different `(category, visual)` buckets, and
+//!     between the last import and the first non-import item.
+//!     `crate` / `super` / `self` / `local-mod` share one
+//!     [`VisualGroup`] so they stay glued together.
 //!
-//!   * **`pub mod` / `mod` boundary** (`pub_mod_first = true`): a blank
-//!     line between the two `Mod` sub-buckets.
+//!   * **`pub mod` / `mod` boundary** (only when
+//!     `cfg.no_preserve_mod_order` is on, which opts into
+//!     pub-mod-first grouping): a blank line between the two `Mod`
+//!     sub-buckets.
 //!
 //! Blank lines that already exist in source trivia (a `Block`'s
 //! `leading` / `trailing`) are respected — we never insert a duplicate.

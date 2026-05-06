@@ -185,32 +185,35 @@ mod tests {
 
 ### 文件发现范围
 
+文件选择参数刻意收缩到 `cargo fmt` 的子集——同样的参数组合产出**同一份**文件清单。**不支持直接传文件或目录**（cargo fmt 也不支持），按 package 维度操作即可。
+
 | 参数 | 作用 |
 | --- | --- |
 | `--all` | 处理 workspace 里所有成员（对齐 `cargo fmt --all`） |
 | `-p`, `--package <NAME>` | 只处理指定的 package（对齐 `cargo fmt -p NAME`），可重复 |
-| `--manifest-path <PATH>` | 指定 `Cargo.toml` 的路径用于发现文件 |
-| `--exclude <substr>` | 路径包含该子串就跳过 |
+| `--manifest-path <PATH>` | 指定 `Cargo.toml` 的路径用于发现文件（对齐 `cargo fmt --manifest-path`） |
 
 ### Item 排序策略
 
 | 参数 | 作用 |
 | --- | --- |
-| `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
-| `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
-| `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
-| `--no-import-groups` | 不分 std / external / crate 三组 |
-| `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
+| `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
+| `--no-import-groups` | 不分 std / external / crate 三组 |
+| `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
+| `--no-reorder-fields` | 不对 `struct` / `union` / `enum` 内部的具名字段做"前缀分组+长度排序"（默认开启，见「关于 `--no-reorder-fields`」） |
+| `--no-reorder-impl-fns` | 保留 `impl` / `trait` 块内成员（`const` / `type` / `fn` / `async fn`）的源序，字段级和顶层级排序仍然生效 |
+| `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
 | `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
+| `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
 | `--no-short-trait-path-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
 
 ### 输出模式
 
 | 参数 | 作用 |
 | --- | --- |
+| `--fmt` | reorder 之前先跑一遍 `cargo fmt`（沿用同样的 `--all` / `-p` / `--manifest-path`）。`--check` 模式下自动跳过，避免 CI gate 写盘。 |
 | `--check` | CI 模式：有变化就退出码 1 |
-| `--stdout` | 写到 stdout 不修改文件 |
 | `-v`, `--verbose` | 打印每个被改写的文件名（默认是静默） |
 | `--color <auto\|always\|never>` | 给 `--check` 的 diff 上色（`-` 红、`+` 绿、头部青）和 parse error 上色。默认 `auto`：stderr 是 tty 且没有 `NO_COLOR` 环境变量时才上色。 |
 
@@ -328,6 +331,52 @@ cargo build --release --bin sample-stats
 | tracing | 12 | 7 | 0 |
 
 按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--no-trait-before-struct`。
+
+## 关于 `--no-reorder-fields`
+
+默认情况下 cargo-reorder 在**三个层面**用同一套分组规则：
+
+- **字段级**：每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段
+- **顶层（同类内部）**：连续的顶层 `struct` / `union` / `enum` / `trait` / `fn` / `async fn` 之间，同类 item 按同样的"前缀分组 + 长度"规则重排。`impl` 块跟随它锚定的类型一起移动，所以 `struct Foo` + `impl Foo` 始终连在一起
+- **`impl` / `trait` 块内部**：成员按与顶层一致的分类顺序排——`const` → `type` → `fn` → `async fn`，每一类内部再用前缀分组 + 长度规则。宏 / verbatim 成员是硬屏障，整个 body 保持源序
+
+三个层面共用的规则：
+
+1. **按"首词"分组**：
+   - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
+   - PascalCase / camelCase：取第一个小写→大写的转折之前（`FooBar` → `Foo`，`fooBar` → `foo`）
+   - 没有 `_` 也没有大小写转折的（`Foo`、`BAR`、`XMLParser`）自成一组
+2. **组内**按名字长度升序，短的在前（`bar_x` 在 `bar_long_name` 之前），同长度按原顺序
+3. **组间**按**该组的平均名字长度**升序（所有成员名字长度的算数平均），同长度按原顺序
+4. 不同组之间插入**一个空行**，组内字段紧贴
+
+示例（左为输入，右为输出）：
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+加 `--no-reorder-fields` 同时关掉三层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部保持原样，每个 `impl` / `trait` body 也保持原样。如果只想保留 `impl` / `trait` body 的源序、其他两层照常排（比如方法是 builder 链、有特定调用顺序），用更精准的 `--no-reorder-impl-fns`。
+
+字段级 pass 会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
+
+| 模式 | 跳过原因 |
+| --- | --- |
+| 任何 `#[repr(...)]`（C、packed、transparent、align(N)、整型 repr） | 重排会改 ABI / 内存布局 |
+| `#[derive(Ord)]` 或 `#[derive(PartialOrd)]` | 派生比较按字段/变体声明顺序读 |
+| `enum` 任一变体带显式 discriminant（`A = 1`） | 重排会无声修改其它变体的隐式值 |
+| 元组 struct / 元组变体 / 单元 struct / 单元变体 | 没有字段名可分组 |
+| 单行布局（`struct S { a: u8, b: u8 }`） | 行级切片无法干净地分离它们，保持原样 |
+| 字段数 < 2 | 没东西可排 |
+
+这些跳过规则故意写得保守，目标是"默认开启字段重排始终是安全的"。如果你的代码里发现还有该跳过的场景，请提 issue。
 
 ## 关于 `--no-reorder-inline-mods`
 
