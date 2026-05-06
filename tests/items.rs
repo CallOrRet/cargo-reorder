@@ -189,15 +189,21 @@ fn extern_block_lands_before_fn() {
 }
 
 #[test]
-fn macro_rules_with_no_callers_sorts_to_end() {
+fn macro_rules_pins_in_source_position() {
+    // Macro at the top of the file pins there as a barrier; nothing
+    // below crosses it. (See tests/macros.rs for the broader contract.)
     let input = "macro_rules! unused { () => {}; }\nfn z() {}\nstruct S;\n";
     let out = reorder_source(input).unwrap();
+    let p_macro = out.find("macro_rules! unused").unwrap();
     let p_struct = out.find("struct S").unwrap();
     let p_fn = out.find("fn z").unwrap();
-    let p_macro = out.find("macro_rules! unused").unwrap();
     assert!(
-        p_struct < p_fn && p_fn < p_macro,
-        "struct < fn < unused-macro:\n{out}"
+        p_macro < p_struct,
+        "macro must pin above subsequent items:\n{out}"
+    );
+    assert!(
+        p_struct < p_fn,
+        "below-barrier section sorts by category:\n{out}"
     );
 }
 
@@ -217,14 +223,17 @@ fn cfg_test_mod_forced_to_end() {
 
 #[test]
 fn full_canonical_pipeline() {
-    // One file with every item kind in the wrong order.
+    // One file with every non-macro item kind in the wrong order.
+    // No `macro_rules!` here — under the barrier rule a macro would
+    // pin in place and split the file into two independent sort
+    // segments, which would clobber the canonical-order assertion.
+    // tests/macros.rs covers macro placement separately.
     let input = r#"
 #[cfg(test)]
 mod tests { #[test] fn t() {} }
 
 async fn ay() {}
 fn z() {}
-macro_rules! m { () => {}; }
 extern "C" { fn ext(); }
 trait T {}
 struct S;
@@ -242,10 +251,6 @@ extern crate alloc;
         "extern crate alloc",
         "use serde::Serialize",
         "pub use crate::reexport::Foo",
-        // `macro_rules! m` is pulled before `mod child;` by the
-        // conservative cross-file constraint (no source_path is given,
-        // so we assume the child file might use the macro).
-        "macro_rules! m",
         "mod child;",
         "const KAY",
         "static SVAR",

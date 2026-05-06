@@ -462,15 +462,11 @@ fn reorder_with_mod_dir(
 
     let lines: Vec<&str> = split_keep_endings(source);
     let header_end_line = compute_header_end_line(&parsed);
-    // Materialise each item's TokenStream once and reuse it for the
-    // line-range pass and any subsequent macro-call scan. Rebuilding via
-    // `item.to_tokens(&mut ts)` is a full syn AST walk; cloning the
-    // produced TokenStream is just a Vec<TokenTree> copy, several × cheaper.
-    let item_streams: Vec<TokenStream> = parsed.items.iter().map(item_to_token_stream).collect();
-    let ranges: Vec<(usize, usize)> = item_streams
+    let ranges: Vec<(usize, usize)> = parsed
+        .items
         .iter()
-        .map(|ts| {
-            let (s, e) = tokens_line_range(ts.clone());
+        .map(|item| {
+            let (s, e) = tokens_line_range(item_to_token_stream(item));
             (s.max(1), e.max(s).max(1))
         })
         .collect();
@@ -522,19 +518,13 @@ fn reorder_with_mod_dir(
         }
     }
 
-    // Macro pipeline stages 1–3: segments, definitions, per-item uses.
-    // `#[macro_use] mod foo;` is demoted from a hard barrier when the
-    // child file's exported macros are provably unused by any sibling
-    // in this scope; the precise check costs one extra child-file open
-    // but unlocks reordering across mods that don't actually leak any
-    // call sites.
-    let macro_use_relevant =
-        crate::macros::compute_macro_use_relevance(&parsed.items, &item_streams, mod_dir);
-    let segments =
-        crate::macros::compute_segments(&parsed.items, |i| macro_use_relevant.contains(&i));
-    let macro_defs = crate::macros::collect_macro_defs(&parsed.items);
-    let macro_names: HashSet<String> = macro_defs.iter().map(|(n, _)| n.clone()).collect();
-    let item_uses = crate::macros::collect_item_uses(&parsed.items, &item_streams, &macro_names);
+    // Macro placement: every `macro_rules!`, every bare top-level
+    // macro invocation, and every `#[macro_use] mod` becomes a hard
+    // barrier — pinned in source position, with no other item allowed
+    // to reorder across it. This is a deliberate trade of sort
+    // quality for a very simple correctness story; see `src/macros.rs`
+    // for the rationale.
+    let segments = crate::macros::compute_segments(&parsed.items);
 
     // Floating-comment fences: a `//`-line comment block sandwiched by
     // blank lines on both sides is treated as a section divider. The
@@ -668,33 +658,6 @@ fn reorder_with_mod_dir(
     }
 
     blocks.sort_by_key(|b| b.sort_key);
-
-    // Macro pipeline stages 4–6: per-mod constraints, transitive
-    // closure, yank-to-before-caller fixpoint.
-    let (mod_constraints, conservative_mods) = crate::macros::collect_mod_constraints(
-        &parsed.items,
-        mod_dir,
-        &macro_names,
-        item_to_token_stream,
-    );
-    let effective_uses = crate::macros::compute_effective_uses(&item_uses, &macro_defs);
-    let cap_hit = crate::macros::yank_macro_defs(
-        &mut blocks,
-        &macro_defs,
-        &effective_uses,
-        &mod_constraints,
-        &conservative_mods,
-        |b| b.sort_key.original_index,
-    );
-    if cap_hit {
-        let where_ = mod_dir
-            .map(|d| format!(" near {}", d.display()))
-            .unwrap_or_default();
-        eprintln!(
-            "cargo-reorder: warning: macro_rules! yank fixpoint hit iteration cap{where_}; \
-             output is safe but may be sub-optimal. Please file a bug with a minimal repro.",
-        );
-    }
 
     let header = take_lines(&lines, 1, header_end_line);
     Ok(crate::emit::assemble(

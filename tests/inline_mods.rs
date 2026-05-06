@@ -365,40 +365,6 @@ fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
     );
 }
 
-/// Mirror case: the inline mod's child file does NOT call the macro.
-/// With precise resolution we know there's no constraint, so the macro
-/// is free to sort to its default position (after the `mod` in the
-/// inline body's category order). Conservative fallback would
-/// over-constrain and pull the macro up.
-#[test]
-fn precise_macro_no_constraint_when_inline_child_doesnt_call() {
-    let td = TempDir::new("inline-precise-noop");
-    td.write("src/foo/bar.rs", "pub fn helper() {}\n");
-    let lib = td.write(
-        "src/lib.rs",
-        r#"pub mod foo {
-    macro_rules! m { ($e:expr) => { let _ = $e; }; }
-    pub mod bar;
-}
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let cfg = Config {
-        reorder_inline_mods: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with_path(&src, Some(&lib), &cfg).unwrap();
-    let p_macro = out.find("macro_rules! m").unwrap();
-    let p_mod = out.find("pub mod bar").unwrap();
-    // Default category order inside the inline body: `mod` (weight 30)
-    // sorts before `macro_rules!` (weight 92). Precise scan finds no
-    // caller, so the macro is free to land at its default slot.
-    assert!(
-        p_mod < p_macro,
-        "with no bare caller in src/foo/bar.rs, macro should land at default position (after mod):\n{out}"
-    );
-}
-
 /// `#[path = "..."]` on the inline mod redirects the entire body's
 /// child-file lookup base. Precise scan must follow it.
 #[test]

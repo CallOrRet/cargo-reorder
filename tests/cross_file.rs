@@ -1,10 +1,11 @@
-//! Cross-file macro constraint: when reordering a parent file (lib.rs),
-//! we open each `mod foo;` declaration's child file and check whether
-//! it actually invokes any of our local `macro_rules!` bare. Only those
-//! mods need the textual-scope constraint; mods whose child file
-//! imports the macro via `use crate::name;` (or doesn't use it at all)
-//! impose no position constraint and let the macro sort to its default
-//! end-of-file slot.
+//! Cross-file behaviour around `mod foo;` declarations: with macro
+//! items now treated as hard barriers (see `src/macros.rs`), the
+//! parent file no longer opens child files to look for callers — the
+//! barrier alone keeps every `macro_rules!` pinned in source position.
+//! These tests cover the leftover surface area:
+//!   * `mod foo;` lookup still locates `src/foo.rs` / `src/foo/mod.rs`
+//!   * `#[path = "..."]` overrides are honoured
+//!   * missing child files don't crash discovery
 
 use std::env;
 use std::fs;
@@ -78,60 +79,7 @@ pub mod paths;
 /// is reachable through name resolution, no textual scope needed, and
 /// the cross-file scan should drop the position constraint — the
 /// macro is free to sort to its default end-of-file slot.
-#[test]
-fn child_using_use_crate_macro_relaxes_constraint() {
-    let td = TempDir::new("relaxes");
-    td.write(
-        "src/paths.rs",
-        "use crate::t;\npub fn helper() {\n    t!(\"hi\");\n}\n",
-    );
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_mod < p_macro,
-        "with `use crate::t;` in paths.rs, the macro is free to sort to its default end-of-file position:\n{out}"
-    );
-}
-
-/// Child doesn't reference the macro at all → no constraint.
-#[test]
-fn child_that_does_not_use_the_macro_does_not_constrain() {
-    let td = TempDir::new("unused");
-    td.write("src/paths.rs", "pub fn helper() {}\n");
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_mod < p_macro,
-        "child doesn't use the macro at all → no position constraint:\n{out}"
-    );
-}
-
-/// `#[path = "..."]` overrides the conventional file lookup. The
-/// cross-file scan must follow it.
+/// `#[path = "..."]` overrides the conventional file lookup.
 #[test]
 fn path_attribute_on_mod_locates_child_file() {
     let td = TempDir::new("path_attr");

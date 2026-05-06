@@ -61,8 +61,6 @@ async fn fetch() {}
 
 fn helper() -> i32 { 1 }
 
-macro_rules! shout { ($e:expr) => { $e } }
-
 extern "C" {
     fn external();
 }
@@ -127,8 +125,6 @@ pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
 
-macro_rules! shout { ($e:expr) => { $e } }
-
 mod helpers;
 pub mod public_api;
 
@@ -177,7 +173,7 @@ mod tests {
 * `extern crate alloc;` 排到最前面，和 `use` 块之间空一行。
 * `use` 拆成 std / external / crate-local 三个视觉组，组间空行。第三组内部按 `crate` → `super` → `self` → local-mod 的顺序；这里 `helpers` 因为有同文件里的 `mod helpers;` 声明，被识别为 local-mod。
 * `pub use` 同样按这套子分组，但单独成一块，紧跟在 `use` 之后。
-* `macro_rules! shout` 在这次输出里被拉到 `mod helpers;` / `mod public_api;` **之前**，**只是因为这个示例是单文件跑的** —— 工具试图打开 `helpers.rs` / `public_api.rs` 都失败（不存在），跨文件扫描走到了保守分支：「读不到的子文件，假设它可能 bare 调用本宏，于是把每个 `macro_rules!` 钉到后续 `mod foo;` 之前」。**真实 cargo 项目里子文件存在，工具会打开并扫描** —— 子文件确实有 bare `shout!()` 才约束，否则 `macro_rules! shout` 就落到默认 `Category::Macro` 位置（文件末尾附近）。
+* 这个示例里没有 `macro_rules!`。如果有,每个宏 item 都会作为 barrier(见下文「宏 item 是硬 barrier」),会把周围的排序切成独立的"barrier 之上 / barrier 之下"两段。
 * `struct Foo` 后面贴着它的三个 impl，顺序是 inherent (`impl Foo`) → std trait (`impl Display for Foo`) → 第三方 trait (`impl other_crate::Trait for Foo`)。
 * `trait Greet` 也带走了 `impl Greet for u32` —— 因为目标类型 `u32` 不在本文件，impl 锚定到 trait 而不是类型。
 * `#[cfg(test)] mod tests` 不论原文里在哪，最终都在文件末尾。
@@ -307,7 +303,7 @@ cargo build --release --bin sample-stats
 | `#[macro_use] mod ...` | 里面定义的 `macro_rules!` 会泄露到父作用域，body 内重排会改变可见性顺序 |
 | 纯 `use` mod（所有 item 都是 `use ...`） | 覆盖 `prelude`、`__private`、sealed-trait re-export 等场景 —— 这种顺序就是公共 API 的一部分 |
 
-只要 body 里**有一个非-`use` 的 item**，这个 mod 就是合格目标。递归进 inline body 时跨文件宏调用扫描是**精确**的：父文件路径已知时，递归会按 inline mod 的子目录（默认 `<父目录>/<mod 名>/`，或者从 `#[path = "..."]` 推出来的目录）解析 body 内 `mod bar;` 声明指向的子文件。也就是说 inline mod 内定义的 `macro_rules!`，只会被那些**真的 bare 调用了它**的 `mod bar;` 子文件约束位置 —— 和文件顶层是一样的精度保证。
+只要 body 里**有一个非-`use` 的 item**,这个 mod 就是合格目标。inline mod body 内的 `macro_rules!` 同样作为 barrier 处理 —— 在 body 内部钉位,body 内任何其他 item 都不能跨过它。
 
 默认关，因为 `prelude` 风格 mod 和 codegen 脚手架在生态里很常见，意外重排它们的代价比"常规 inline mod 重排"的收益大。建议先在代表性文件上看完 diff 再全项目开。
 
@@ -393,8 +389,8 @@ cargo reorder --all
 | `tests/items.rs` | 16 种顶层 item 各自归到正确分类 |
 | `tests/imports.rs` | `extern crate` / `use` / `pub use` 分组和别名 |
 | `tests/impls.rs` | impl 锚定 + inherent → std → crate → external 四档排序 |
-| `tests/macros.rs` | `macro_rules!` 放置、链式、barrier、cfg 多重定义 |
-| `tests/cross_file.rs` | 扫描子文件检查 bare 使用本地宏 |
+| `tests/macros.rs` | 宏 item 作为 barrier 的语义:钉位、段隔离、idempotent |
+| `tests/cross_file.rs` | `mod foo;` 文件查找、`#[path]` 重定向、子文件缺失 fallback |
 | `tests/comments.rs` | leading 注释、内部 doc、文件头注释块 |
 | `tests/attributes.rs` | `#[derive]` / `#[cfg]` / `#[cfg_attr]` / 多行属性 |
 | `tests/generics.rs` | 生命周期、where 子句、const 泛型、GAT、HRTB、async trait |
@@ -407,7 +403,12 @@ cargo reorder --all
 
 ### 验证过程中发现的注意点
 
-* **`macro_rules!` 是文本作用域。** `macro_rules! foo` 的可见范围只覆盖它定义之后的代码（在同文件内，以及子模块当 `mod foo;` 声明位于宏定义之后时）。所以工具：（a）把所有顶层裸宏调用（`Item::Macro` 且 `ident = None`，如 `lazy_static! { ... }`）当成屏障，不跨过它移动其他 item；（b）在排序后做一遍后处理，把每个 `macro_rules!` 定义拉到它在本文件第一次被调用之前，并放到所有源码里跟在它之后的 `mod foo;` 声明之前。
+* **宏 item 是硬 barrier。** `macro_rules!` 是文本作用域,且调用点形态多(struct 字段初始化、类型注解、深埋在 sibling 文件里通过 `#[macro_use] mod` 漏出来 …)。与其每种形态都试图正确识别 caller,工具直接把所有宏相关的顶层 item 钉在源码位置,**禁止任何其他 item 跨越**。barrier 集合:
+  - `macro_rules! foo`(无论有没有 ident)—— 钉自己
+  - `lazy_static! { ... }` / `to_hash_map!(...)` 这类裸顶层宏调用 —— 钉自己
+  - `#[macro_use] mod foo;` —— 钉自己,因为它从这一行开始把 child 的 `macro_rules!` 漏到父 scope
+
+  代价:含多个宏的文件会被切成多个独立排序段,有时排得没那么彻底。换来的是规则极其简单、永远不会产生编译不过的输出。
 * **支持 RFC 3502 cargo-script 文件。** 开头带 `---` ... `---` TOML frontmatter 的单文件脚本（前面可以有 shebang）会被识别：frontmatter 原样保留，只重排 Rust 主体部分。`---` 裸开头和 `---cargo` 带 info string 两种形式都支持。
 * **构建文件 parse 错误严格、非构建文件静默跳过。** 对齐 `cargo fmt`：从 cargo target 的 `src_path` 沿 mod 树能走到的文件（也就是项目真的会编译的文件）按严格处理 —— parse 错误会打印 rustc 风格诊断并以非零状态码退出。**不在**构建树里的文件（典型如 cargo 自己的 `tests/testsuite/script/rustc_fixtures/`、rustfix 的 `tests/everything/`，以及其他扩展名是 `.rs` 但不参与编译的测试夹具）parse 失败时静默跳过。这个判断用的是和默认发现模式同一份 `cargo metadata` 输出，所以无论是 `cargo-reorder` 不带参数、加 `--all`、还是给显式路径，都能正确分类。
 

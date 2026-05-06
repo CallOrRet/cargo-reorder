@@ -88,8 +88,6 @@ async fn fetch() {}
 
 fn helper() -> i32 { 1 }
 
-macro_rules! shout { ($e:expr) => { $e } }
-
 extern "C" {
     fn external();
 }
@@ -155,8 +153,6 @@ pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
 
-macro_rules! shout { ($e:expr) => { $e } }
-
 mod helpers;
 pub mod public_api;
 
@@ -211,17 +207,9 @@ Things to notice:
   matched by the file-level `mod helpers;` declaration).
 * `pub use` mirrors the same sub-grouping but sits in its own block
   after `use`.
-* `macro_rules! shout` lands **above** `mod helpers;` / `mod public_api;`
-  in this particular run because the worked example is run on a
-  standalone single file — there is no `helpers.rs` / `public_api.rs`
-  to scan, so the cross-file pass falls back to its conservative rule
-  ("pin every `macro_rules!` ahead of any later `mod foo;` whose child
-  we cannot inspect, in case it bare-invokes the macro"). In a real
-  cargo project where the child files exist, the reorderer opens them
-  and only applies the constraint when the child actually does a bare
-  `shout!()` call without `use crate::shout;`. Without such a caller,
-  `macro_rules! shout` would sort at its default `Category::Macro`
-  position near the end of the file.
+* No `macro_rules!` in this example. When present, every macro item
+  is a barrier (see "Macro items are hard barriers" below) and the
+  surrounding sort is split into independent before / after segments.
 * `struct Foo` is followed by its three `impl` blocks in the order
   inherent (`impl Foo`) → std trait (`impl Display for Foo`) →
   external trait (`impl other_crate::Trait for Foo`).
@@ -394,15 +382,9 @@ listing order is part of the contract or affects compilation:
 | Pure-`use` mods (every item is `use ...`) | covers `prelude`, `__private`, sealed-trait re-export shims — listing order is the public contract |
 
 A mod with at least one non-`use` item is eligible. Inside an
-eligible body, cross-file macro-caller scanning is **precise**:
-when the parent file has a known path, the recursion synthesises
-the inline mod's child mod-directory (`<parent_dir>/<mod_name>/`,
-or the directory derived from `#[path = "..."]` on the inline
-mod) and uses it to locate `mod bar;` child files inside the
-body. So a `macro_rules!` defined in the inline mod is only
-constrained to precede those `mod bar;` declarations whose child
-files actually call it bare — same precision guarantee as at the
-file top level.
+eligible body, every `macro_rules!` is treated as a barrier just
+like at the file top level — it pins in place and forbids body
+items from reordering across it.
 
 The flag is off by default because `prelude`-style modules and
 codegen scaffolding are common enough that surprise reorders
@@ -501,8 +483,8 @@ concern:
 | `tests/items.rs` | each of the 16 top-level item categories lands in its slot |
 | `tests/imports.rs` | `extern crate` / `use` / `pub use` grouping and renames |
 | `tests/impls.rs` | impl anchoring and the 4-tier inherent → std → crate → external order |
-| `tests/macros.rs` | `macro_rules!` placement, chains, barriers, cfg-gated alternatives |
-| `tests/cross_file.rs` | scanning child mod files for actual bare uses of local macros |
+| `tests/macros.rs` | macro-as-barrier semantics: pinning, segment isolation, idempotence |
+| `tests/cross_file.rs` | `mod foo;` lookup, `#[path]` overrides, missing-child fallback |
 | `tests/comments.rs` | leading comments, inner doc, file-level header blocks |
 | `tests/attributes.rs` | `#[derive(...)]` / `#[cfg(...)]` / `#[cfg_attr]` / multi-line attrs |
 | `tests/generics.rs` | lifetimes, where clauses, const generics, GAT, HRTB, `async fn in trait` |
@@ -515,15 +497,23 @@ concern:
 
 ### Caveats discovered during validation
 
-* **`macro_rules!` is textually scoped.** A `macro_rules! foo` is
-  visible only after its definition (within the same file, and within
-  child modules whose `mod foo;` declaration sits *after* the macro
-  definition). The reorderer therefore (a) treats every bare top-level
-  macro invocation (`Item::Macro` with no `ident`, e.g.
-  `lazy_static! { ... }`) as a barrier that no other item is reordered
-  across, and (b) post-processes its sorted output to yank every
-  `macro_rules!` definition back to just before its first caller and
-  before any subsequent file `mod foo;` declaration.
+* **Macro items are hard barriers.** `macro_rules!` is textually
+  scoped, and call sites can hide in many shapes (struct-field-init
+  position, type annotations, deeply nested in a sibling file
+  reached through `#[macro_use] mod`, …). Rather than try to detect
+  every caller correctly, the reorderer pins every macro-related
+  top-level item in its source position and forbids any other item
+  from reordering across it. The barrier set:
+  - `macro_rules! foo` (with or without ident) — pins itself
+  - bare top-level `lazy_static! { ... }` / `to_hash_map!(...)` style
+    invocations — pin themselves
+  - `#[macro_use] mod foo;` — pins itself, since its child's exported
+    macros leak into this scope from this point downward
+
+  Trade-off: a file with several macros gets split into multiple
+  independent sort segments, so the result is sometimes less
+  thoroughly reordered than it could be. In exchange, the rule is
+  trivial to reason about and never produces uncompilable output.
 * **RFC 3502 cargo-script files are supported.** Single-file scripts
   with a leading `---` ... `---` TOML frontmatter (with or without a
   preceding shebang) are detected, the frontmatter is preserved
