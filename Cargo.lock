@@ -159,7 +159,6 @@ dependencies = [
  "serde_json",
  "similar",
  "syn",
- "walkdir",
 ]
 
 [[package]]
