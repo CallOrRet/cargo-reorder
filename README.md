@@ -265,9 +265,14 @@ Grouped by function.
 > means all visibility variants (`pub`, `pub(crate)`, `pub(super)`,
 > `pub(in path)`) and inline `mod foo { ... }` nesting are handled
 > correctly. Each scope (file body OR inline non-test `mod` body)
-> contributes one observation; **test mods** (named `tests` /
-> `test`, or `#[cfg(test)]`-attributed) are skipped both as their
-> own observation and as something to recurse into.
+> contributes one observation. For two item kinds A and B, the
+> scope's verdict is **pair-majority**: count every (a, b) pair and
+> see whether more of them have a-before-b or b-before-a; the
+> winning side gets the vote, an exact split is "tied". This is
+> robust to zig-zag layouts (`mod a; use x; mod b; use y; ...`)
+> in a way that "first occurrence" is not. **Test mods** (named
+> `tests` / `test`, or `#[cfg(test)]`-attributed) are skipped
+> entirely.
 
 ### Reproducing the numbers
 
@@ -280,10 +285,12 @@ cargo build --release --bin sample-stats
 # One project:
 ./target/release/sample-stats ~/src/serde
 
-# Many at once — totals are aggregated across all of them:
+# Many at once — each project votes once in the rollup:
 ./target/release/sample-stats \
-    ~/src/anyhow ~/src/serde ~/src/clap ~/src/regex \
-    ~/src/syn ~/src/ripgrep ~/src/tracing ~/src/tokio ~/src/cargo
+    ~/src/anyhow ~/src/axum ~/src/bat ~/src/bevy ~/src/cargo \
+    ~/src/chrono ~/src/clap ~/src/diesel ~/src/hyper ~/src/itertools \
+    ~/src/rayon ~/src/regex ~/src/reqwest ~/src/ripgrep ~/src/rust-analyzer \
+    ~/src/serde ~/src/syn ~/src/thiserror ~/src/tokio ~/src/tower ~/src/tracing
 ```
 
 Per-project progress goes to **stderr**; the three Markdown
@@ -295,81 +302,133 @@ go to **stdout**, so you can pipe them straight into a doc:
 ```
 
 Each `.rs` file under every given directory is parsed with
-`syn::parse_file` (`target/` and `.git/` are skipped). Files
-that fail to parse are counted under `parse-skipped` in the
-stderr line and don't contribute observations. There are no
-flags — every observation rule (test-mod skipping, inline-mod
-recursion, visibility handling) is fixed by the source.
+`syn::parse_file`. Skipped at the directory level: `target/`,
+`.git/`, plus the conventional non-library directories
+`tests/`, `examples/`, and `benches/` — those follow integration
+conventions (`mod common;` shims, derive-UI fixtures, throw-away
+structs) that don't reflect how the project's library source
+organises items. Files that fail to parse are counted under
+`parse-skipped` in the stderr line and don't contribute
+observations. There are no flags — every observation rule
+(test-mod skipping, inline-mod recursion, visibility handling)
+is fixed by the source.
 
 ## On `--pub-mod-first`
 
 Counting scopes that contain BOTH a `pub mod foo;` and a private
 `mod foo;` declaration (external declarations only, not inline
-`mod foo { ... }` blocks) — 64 scopes across the 9 projects:
+`mod foo { ... }` blocks) — 200 scopes across 19 of the 21 projects
+(thiserror and anyhow have no qualifying scopes):
 
-| project | pub-first | priv-first | interleaved |
+| project | pub-first | priv-first | tied |
 | --- | --: | --: | --: |
-| ripgrep | 0 | 0 | 1 |
+| axum | 4 | 5 | 0 |
+| bat | 1 | 2 | 0 |
+| bevy | 25 | 21 | 1 |
+| cargo | 4 | 5 | 5 |
+| chrono | 1 | 1 | 1 |
+| clap | 2 | 5 | 0 |
+| diesel | 17 | 7 | 1 |
+| hyper | 2 | 1 | 0 |
+| itertools | 1 | 0 | 1 |
+| rayon | 2 | 0 | 0 |
+| regex | 6 | 1 | 1 |
+| reqwest | 3 | 0 | 1 |
+| ripgrep | 0 | 1 | 0 |
+| rust-analyzer | 14 | 13 | 1 |
 | serde | 4 | 2 | 0 |
-| syn | 1 | 0 | 1 |
-| clap | 1 | 4 | 2 |
-| regex | 2 | 1 | 5 |
-| tracing | 1 | 3 | 3 |
-| cargo | 2 | 2 | 10 |
-| tokio | 3 | 2 | 14 |
+| syn | 1 | 1 | 0 |
+| tokio | 8 | 9 | 2 |
+| tower | 7 | 3 | 0 |
+| tracing | 4 | 3 | 0 |
 
-Aggregate: **22% pub-first, 22% private-first, 56% interleaved**.
-Default keeps the relative order from the source — `pub mod` and
-`mod` aren't reshuffled by visibility.
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **10/19
+pub-first (53%), 5/19 priv-first (26%), 4/19 tied (21%)**.
+Slight pub-first lean. Default still keeps the relative order from
+the source — turning the flip on by default would silently shuffle
+files for the ~26% of projects that lean priv-first plus the ~21%
+that are split. Pass `--pub-mod-first` if your project follows the
+majority pattern.
 
 ## On `--mod-before-use`
 
 There is **no official rule** about whether `mod` or `use` comes
 first. Counting scopes that contain both an external `mod foo;`
-declaration and a `use ...;` — 254 scopes across the 9 projects
+declaration and a `use ...;` — 618 scopes across the 21 projects
 (inline `mod foo { ... }` blocks don't count as `mod` declarations
 for this comparison; their bodies are sampled separately as their
 own scopes):
 
-| project | use-first | mod-first |
-| --- | --: | --: |
-| ripgrep | 100% | 0% |
-| cargo | 100% | 0% |
-| regex | 96% | 4% |
-| tracing | 96% | 4% |
-| clap | 95% | 5% |
-| anyhow | 83% | 17% |
-| serde | 78% | 22% |
-| tokio | 42% | 58% |
-| syn | 15% | 85% |
+Counts are scope-vote tallies (each scope votes once via
+pair-majority for use-first / mod-first / tied):
 
-Aggregate: **76% use-first, 24% mod-first**. Default is use-first;
-pass `--mod-before-use` if your project leans the other way (notably
-`syn`, which is overwhelmingly mod-first inside its many inline
-sub-modules, and `tokio`, which is mod-first across its workspace).
+| project | use-first | mod-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 0 | 1 | 0 |
+| axum | 8 | 11 | 2 |
+| bat | 3 | 2 | 0 |
+| bevy | 40 | 133 | 1 |
+| cargo | 28 | 13 | 1 |
+| chrono | 6 | 3 | 0 |
+| clap | 4 | 16 | 0 |
+| diesel | 16 | 33 | 2 |
+| hyper | 5 | 5 | 0 |
+| itertools | 1 | 1 | 0 |
+| rayon | 4 | 5 | 2 |
+| regex | 21 | 3 | 0 |
+| reqwest | 4 | 2 | 0 |
+| ripgrep | 11 | 1 | 0 |
+| rust-analyzer | 31 | 85 | 1 |
+| serde | 2 | 11 | 0 |
+| syn | 0 | 2 | 0 |
+| thiserror | 0 | 2 | 0 |
+| tokio | 9 | 39 | 0 |
+| tower | 2 | 22 | 1 |
+| tracing | 15 | 7 | 1 |
+
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **7/21 use-first
+(33%), 12/21 mod-first (57%), 2/21 tied (10%)**. The data now leans
+mod-first under pair-majority semantics. Default is still use-first
+(matches `rustfmt`-style imports-on-top community guidance and
+preserves output stability for users on this default); pass
+`--mod-before-use` to flip.
 
 ## On `--struct-before-trait`
 
 Counting `trait` vs `struct` / `enum` / `union` declarations in
-scopes that have both — 105 scopes across the 9 projects:
+scopes that have both — 455 scopes across 20 of the 21 projects
+(thiserror has no qualifying scopes):
 
-| project | trait-first | struct-first |
-| --- | --: | --: |
-| anyhow | 5 | 0 |
-| clap | 9 | 0 |
-| ripgrep | 4 | 0 |
-| syn | 7 | 0 |
-| cargo | 20 | 0 |
-| regex | 13 | 1 |
-| tracing | 17 | 2 |
-| serde | 4 | 4 |
-| tokio | 12 | 7 |
+| project | trait-first | struct-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 1 | 2 | 1 |
+| axum | 7 | 2 | 2 |
+| bat | 2 | 1 | 0 |
+| bevy | 94 | 47 | 12 |
+| cargo | 11 | 7 | 0 |
+| chrono | 1 | 1 | 0 |
+| clap | 4 | 4 | 1 |
+| diesel | 27 | 34 | 8 |
+| hyper | 4 | 2 | 3 |
+| itertools | 7 | 3 | 2 |
+| rayon | 10 | 3 | 0 |
+| regex | 7 | 6 | 1 |
+| reqwest | 7 | 5 | 0 |
+| ripgrep | 2 | 2 | 0 |
+| rust-analyzer | 28 | 31 | 3 |
+| serde | 3 | 2 | 0 |
+| syn | 3 | 2 | 2 |
+| tokio | 11 | 4 | 2 |
+| tower | 10 | 2 | 0 |
+| tracing | 12 | 7 | 0 |
 
-Aggregate: **87% trait-first, 13% struct-first** — strongly
-trait-first. Most crate-internal abstractions are written as
-`pub(crate) trait` *before* the `struct`s that implement them.
-Default is trait-first; pass `--struct-before-trait` only if your
-project bucks this pattern.
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **14/20
+trait-first (70%), 3/20 struct-first (15%), 3/20 tied (15%)**.
+Strongly trait-first. Default is trait-first; pass
+`--struct-before-trait` if your project bucks this pattern.
 
 ## On `--no-reorder-inline-mods`
 

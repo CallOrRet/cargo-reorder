@@ -225,10 +225,12 @@ cargo build --release --bin sample-stats
 # 单个项目：
 ./target/release/sample-stats ~/src/serde
 
-# 多个一起跑 —— 合计数据跨所有项目聚合：
+# 多个一起跑 —— 每个项目在合计里投一票：
 ./target/release/sample-stats \
-    ~/src/anyhow ~/src/serde ~/src/clap ~/src/regex \
-    ~/src/syn ~/src/ripgrep ~/src/tracing ~/src/tokio ~/src/cargo
+    ~/src/anyhow ~/src/axum ~/src/bat ~/src/bevy ~/src/cargo \
+    ~/src/chrono ~/src/clap ~/src/diesel ~/src/hyper ~/src/itertools \
+    ~/src/rayon ~/src/regex ~/src/reqwest ~/src/ripgrep ~/src/rust-analyzer \
+    ~/src/serde ~/src/syn ~/src/thiserror ~/src/tokio ~/src/tower ~/src/tracing
 ```
 
 每个项目的进度信息打到 **stderr**；三张 Markdown 表（mod-vs-use、pub/priv mod 分布、trait-vs-struct）打到 **stdout**，可以直接管道写进文档：
@@ -237,60 +239,94 @@ cargo build --release --bin sample-stats
 ./target/release/sample-stats ~/src/* > stats.md
 ```
 
-每个目录下所有 `.rs` 文件都用 `syn::parse_file` 解析（自动跳过 `target/` 和 `.git/`）。parse 失败的文件在 stderr 那行的 `parse-skipped` 里计数，不参与观察。**没有任何 flag** —— 所有观察规则（跳过 test mod、递归 inline mod、可见性识别）都写死在源码里。
+每个目录下所有 `.rs` 文件都用 `syn::parse_file` 解析。目录层面跳过：`target/`、`.git/`，以及惯例上的非库目录 `tests/`、`examples/`、`benches/` —— 它们走集成测试那套约定（`mod common;` 共享 helper、derive-UI 用的临时 struct、bench 一次性代码），并不反映项目库源码的真实组织风格。parse 失败的文件在 stderr 那行的 `parse-skipped` 里计数，不参与观察。**没有任何 flag** —— 所有观察规则（跳过 test mod、递归 inline mod、可见性识别）都写死在源码里。
 
 ## 关于 `--pub-mod-first`
 
-统计同时含 `pub mod foo;` 和私有 `mod foo;` 声明的 scope（只看外部声明，不算 inline `mod foo { ... }` 块）—— 9 个项目共 64 个 scope：
+每个 scope 用 pair-majority 投票：把 (pub mod, priv mod) 所有配对枚举一遍，看是 pub 在前还是 priv 在前更多——21 个项目里有 19 个有合资格的 scope：
 
-| 项目 | pub-first | priv-first | interleaved |
+| 项目 | pub-first | priv-first | tied |
 | --- | --: | --: | --: |
-| ripgrep | 0 | 0 | 1 |
+| axum | 4 | 5 | 0 |
+| bat | 1 | 2 | 0 |
+| bevy | 25 | 21 | 1 |
+| cargo | 4 | 5 | 5 |
+| chrono | 1 | 1 | 1 |
+| clap | 2 | 5 | 0 |
+| diesel | 17 | 7 | 1 |
+| hyper | 2 | 1 | 0 |
+| itertools | 1 | 0 | 1 |
+| rayon | 2 | 0 | 0 |
+| regex | 6 | 1 | 1 |
+| reqwest | 3 | 0 | 1 |
+| ripgrep | 0 | 1 | 0 |
+| rust-analyzer | 14 | 13 | 1 |
 | serde | 4 | 2 | 0 |
-| syn | 1 | 0 | 1 |
-| clap | 1 | 4 | 2 |
-| regex | 2 | 1 | 5 |
-| tracing | 1 | 3 | 3 |
-| cargo | 2 | 2 | 10 |
-| tokio | 3 | 2 | 14 |
+| syn | 1 | 1 | 0 |
+| tokio | 8 | 9 | 2 |
+| tower | 7 | 3 | 0 |
+| tracing | 4 | 3 | 0 |
 
-合计：**22% pub-first，22% priv-first，56% interleaved**。默认保留源序 —— `pub mod` 和 `mod` 不按可见性重新洗牌。
+按项目聚合（每个项目按其内部多数投一票，平局单独计）：**10/19 pub-first (53%)，5/19 priv-first (26%)，4/19 tied (21%)**。略偏 pub-first。默认仍保留源序 —— 默认开启会让那些偏 priv-first 的项目（约 26%）和持平项目（约 21%）的输出无声变化。项目内部偏 pub-first 时再加 `--pub-mod-first`。
 
 ## 关于 `--mod-before-use`
 
-**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 9 个项目共 254 个：
+**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 21 个项目共 618 个 scope。每个 scope 用 pair-majority 投票（数对 (mod, use) 中谁在前的多数胜出，平局算 tied）：
 
-| 项目 | use-first | mod-first |
-| --- | --: | --: |
-| ripgrep | 100% | 0% |
-| cargo | 100% | 0% |
-| regex | 96% | 4% |
-| tracing | 96% | 4% |
-| clap | 95% | 5% |
-| anyhow | 83% | 17% |
-| serde | 78% | 22% |
-| tokio | 42% | 58% |
-| syn | 15% | 85% |
+| 项目 | use-first | mod-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 0 | 1 | 0 |
+| axum | 8 | 11 | 2 |
+| bat | 3 | 2 | 0 |
+| bevy | 40 | 133 | 1 |
+| cargo | 28 | 13 | 1 |
+| chrono | 6 | 3 | 0 |
+| clap | 4 | 16 | 0 |
+| diesel | 16 | 33 | 2 |
+| hyper | 5 | 5 | 0 |
+| itertools | 1 | 1 | 0 |
+| rayon | 4 | 5 | 2 |
+| regex | 21 | 3 | 0 |
+| reqwest | 4 | 2 | 0 |
+| ripgrep | 11 | 1 | 0 |
+| rust-analyzer | 31 | 85 | 1 |
+| serde | 2 | 11 | 0 |
+| syn | 0 | 2 | 0 |
+| thiserror | 0 | 2 | 0 |
+| tokio | 9 | 39 | 0 |
+| tower | 2 | 22 | 1 |
+| tracing | 15 | 7 | 1 |
 
-合计：**76% use-first，24% mod-first**。默认 use-first；项目偏 mod-first 时（典型如 `syn`，大量 inline 子模块内部全是 mod-first；以及 `tokio` 在工作区层面整体偏 mod-first）加 `--mod-before-use`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**7/21 use-first (33%)，12/21 mod-first (57%)，2/21 tied (10%)**。pair-majority 语义下数据偏 mod-first。默认仍保持 use-first（与 `rustfmt` 风格的 imports-on-top 共识一致，且对已用此默认的用户输出稳定）；要翻转加 `--mod-before-use`。
 
 ## 关于 `--struct-before-trait`
 
-统计同时含 `trait` 和 `struct` / `enum` / `union` 声明的 scope —— 9 个项目共 105 个：
+统计同时含 `trait` 和 `struct` / `enum` / `union` 声明的 scope —— 21 个项目里有 20 个有合资格的 scope。每个 scope 用 pair-majority 投票：
 
-| 项目 | trait-first | struct-first |
-| --- | --: | --: |
-| anyhow | 5 | 0 |
-| clap | 9 | 0 |
-| ripgrep | 4 | 0 |
-| syn | 7 | 0 |
-| cargo | 20 | 0 |
-| regex | 13 | 1 |
-| tracing | 17 | 2 |
-| serde | 4 | 4 |
-| tokio | 12 | 7 |
+| 项目 | trait-first | struct-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 1 | 2 | 1 |
+| axum | 7 | 2 | 2 |
+| bat | 2 | 1 | 0 |
+| bevy | 94 | 47 | 12 |
+| cargo | 11 | 7 | 0 |
+| chrono | 1 | 1 | 0 |
+| clap | 4 | 4 | 1 |
+| diesel | 27 | 34 | 8 |
+| hyper | 4 | 2 | 3 |
+| itertools | 7 | 3 | 2 |
+| rayon | 10 | 3 | 0 |
+| regex | 7 | 6 | 1 |
+| reqwest | 7 | 5 | 0 |
+| ripgrep | 2 | 2 | 0 |
+| rust-analyzer | 28 | 31 | 3 |
+| serde | 3 | 2 | 0 |
+| syn | 3 | 2 | 2 |
+| tokio | 11 | 4 | 2 |
+| tower | 10 | 2 | 0 |
+| tracing | 12 | 7 | 0 |
 
-合计：**87% trait-first，13% struct-first** —— 强烈 trait-first。大部分 crate 内部抽象用 `pub(crate) trait` 写在实现它的 struct **之前**。默认 trait-first；项目逆这个潮流时再加 `--struct-before-trait`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--struct-before-trait`。
 
 ## 关于 `--no-reorder-inline-mods`
 
