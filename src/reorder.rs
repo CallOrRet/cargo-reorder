@@ -5,7 +5,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use proc_macro2::{TokenStream, TokenTree};
 use syn::{File, Item};
 
 use crate::imports::ImportGroup;
@@ -461,8 +460,11 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
         .items
         .iter()
         .map(|item| {
-            let (s, e) = tokens_line_range(item_to_token_stream(item));
-            (s.max(1), e.max(s).max(1))
+            use syn::spanned::Spanned;
+            let span = item.span();
+            let s = span.start().line.max(1);
+            let e = span.end().line.max(s);
+            (s, e)
         })
         .collect();
 
@@ -769,57 +771,15 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
 }
 
 fn compute_header_end_line(parsed: &File) -> usize {
+    use syn::spanned::Spanned;
     let mut max_line = 0usize;
     if parsed.shebang.is_some() {
         max_line = max_line.max(1);
     }
     for attr in &parsed.attrs {
-        let ts = attr_to_token_stream(attr);
-        let (_, e) = tokens_line_range(ts);
-        max_line = max_line.max(e);
+        max_line = max_line.max(attr.span().end().line);
     }
     max_line
-}
-
-fn tokens_line_range(ts: TokenStream) -> (usize, usize) {
-    let mut min: Option<usize> = None;
-    let mut max: Option<usize> = None;
-    let mut update = |s: usize, e: usize| {
-        if s != 0 {
-            min = Some(min.map_or(s, |m| m.min(s)));
-        }
-        if e != 0 {
-            max = Some(max.map_or(e, |m| m.max(e)));
-        }
-    };
-    for tt in ts {
-        // Group::span() already covers the entire delimited group
-        // (open delimiter through close delimiter), so we don't need
-        // to recurse into g.stream() — the inner tokens' lines are
-        // already inside [span.start().line, span.end().line].
-        let span = match &tt {
-            TokenTree::Group(g) => g.span(),
-            TokenTree::Ident(i) => i.span(),
-            TokenTree::Punct(p) => p.span(),
-            TokenTree::Literal(l) => l.span(),
-        };
-        update(span.start().line, span.end().line);
-    }
-    (min.unwrap_or(0), max.unwrap_or(0))
-}
-
-fn item_to_token_stream(item: &Item) -> TokenStream {
-    use syn::__private::ToTokens;
-    let mut ts = TokenStream::new();
-    item.to_tokens(&mut ts);
-    ts
-}
-
-fn attr_to_token_stream(attr: &syn::Attribute) -> TokenStream {
-    use syn::__private::ToTokens;
-    let mut ts = TokenStream::new();
-    attr.to_tokens(&mut ts);
-    ts
 }
 
 /// Decide whether to recurse into an inline `mod foo { ... }` body.
