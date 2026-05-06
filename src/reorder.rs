@@ -9,7 +9,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use syn::{File, Item};
 
 use crate::imports::ImportGroup;
-use crate::text::{split_at_last_blank, split_keep_endings, take_lines};
+use crate::text::{extract_floating_comment, split_at_last_blank, split_keep_endings, take_lines};
 
 /// Traits auto-imported by the Rust compiler via the std/core prelude —
 /// the union of v1 (2015/2018), rust_2021, and rust_2024 entries.
@@ -100,6 +100,13 @@ pub(crate) enum Category {
     Macro,
     TestMod,
     Other,
+    /// Synthetic block representing a "floating" comment block in the
+    /// source — a `//`-line comment surrounded by blank lines on both
+    /// sides. The comment text is stored in the block's `leading`; the
+    /// block has empty body and trailing. The sort_key pins it on its
+    /// own private segment so neighbouring items can't reorder across
+    /// it (it acts like a section divider).
+    Fence,
 }
 
 impl Category {
@@ -182,6 +189,11 @@ impl Category {
             Category::Macro => 92,
             Category::TestMod => 999,
             Category::Other => 500,
+            // Fence sits alone on its own segment (the `segment` field of
+            // its SortKey separates it from any item), so this `primary`
+            // weight is never compared against another block's. Pick a
+            // neutral value.
+            Category::Fence => 0,
         }
     }
 }
@@ -524,6 +536,33 @@ fn reorder_with_mod_dir(
     let macro_names: HashSet<String> = macro_defs.iter().map(|(n, _)| n.clone()).collect();
     let item_uses = crate::macros::collect_item_uses(&parsed.items, &item_streams, &macro_names);
 
+    // Floating-comment fences: a `//`-line comment block sandwiched by
+    // blank lines on both sides is treated as a section divider. The
+    // comment becomes a synthetic Block pinned on its own segment so
+    // items above can't reorder past items below. Per-fence we widen
+    // the segment numbering by FENCE_STRIDE so the fence has room to
+    // sit strictly between the items it separates.
+    const FENCE_STRIDE: u32 = 100;
+    let mut bumped_segments: Vec<u32> = segments
+        .iter()
+        .map(|s| s.saturating_mul(FENCE_STRIDE))
+        .collect();
+    let mut fence_after: Vec<Option<(String, String)>> = vec![None; parsed.items.len()];
+    let mut fence_bump: u32 = 0;
+    for i in 0..parsed.items.len() {
+        bumped_segments[i] = bumped_segments[i].saturating_add(fence_bump);
+        if i + 1 < parsed.items.len() {
+            let (_, end_i) = ranges[i];
+            let (start_next, _) = ranges[i + 1];
+            let gap = take_lines(&lines, end_i + 1, start_next.saturating_sub(1));
+            if let Some((comment, residual)) = extract_floating_comment(&gap) {
+                fence_after[i] = Some((comment, residual));
+                fence_bump = fence_bump.saturating_add(FENCE_STRIDE);
+            }
+        }
+    }
+    let segments = bumped_segments;
+
     // Pre-item gap (before first item).
     let pre_first_gap = take_lines(&lines, header_end_line + 1, ranges[0].0.saturating_sub(1));
     let (header_extra, first_leading) = split_at_last_blank(&pre_first_gap);
@@ -559,6 +598,8 @@ fn reorder_with_mod_dir(
         let sort_input = SortItem {
             item,
             idx,
+            // segments[idx] is already widened by FENCE_STRIDE and
+            // bumped past any preceding fences.
             segment: segments[idx],
             category,
             import_group,
@@ -576,13 +617,54 @@ fn reorder_with_mod_dir(
         });
     }
 
-    for i in 0..blocks.len().saturating_sub(1) {
+    for i in 0..parsed.items.len().saturating_sub(1) {
         let (_, end_i) = ranges[i];
         let (start_next, _) = ranges[i + 1];
         let gap = take_lines(&lines, end_i + 1, start_next.saturating_sub(1));
-        let (trailing, next_leading) = split_at_last_blank(&gap);
+        // If a floating-comment fence lives in this gap, split on what
+        // remains *after* extracting the comment text — the comment
+        // itself is owned by the fence block we append below.
+        let effective_gap = match &fence_after[i] {
+            Some((_, residual)) => residual.clone(),
+            None => gap,
+        };
+        let (trailing, next_leading) = split_at_last_blank(&effective_gap);
         blocks[i].trailing = trailing;
         blocks[i + 1].leading = next_leading;
+    }
+
+    // Append fence blocks. Each one sits on `bumped_segments[i] +
+    // FENCE_STRIDE/2`, which is strictly between the preceding item's
+    // (post-bump) segment and the next item's (already further bumped)
+    // segment — so sort_by_key keeps the fence wedged between them
+    // regardless of how items shuffle within their own segments.
+    // `original_index = n_items + fence_idx` keeps fences out of the
+    // macro pipeline's `[0, n_items)` reverse-index but stays close to
+    // n_items so `yank_macro_defs`'s `pos` Vec doesn't balloon.
+    let n_items = parsed.items.len();
+    let mut fence_idx = 0usize;
+    for (i, fence) in fence_after.iter().enumerate() {
+        if let Some((comment_text, _)) = fence {
+            let fence_segment = segments[i].saturating_add(FENCE_STRIDE / 2);
+            blocks.push(Block {
+                category: Category::Fence,
+                mod_is_pub: None,
+                import_group: None,
+                leading: comment_text.clone(),
+                body: String::new(),
+                trailing: String::new(),
+                sort_key: SortKey {
+                    segment: fence_segment,
+                    primary: 0,
+                    anchor: 0,
+                    follower: 0,
+                    impl_kind: 0,
+                    import_group: 0,
+                    original_index: n_items + fence_idx,
+                },
+            });
+            fence_idx += 1;
+        }
     }
 
     blocks.sort_by_key(|b| b.sort_key);

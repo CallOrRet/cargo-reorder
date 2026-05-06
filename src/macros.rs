@@ -24,7 +24,7 @@
 //! the higher-level stages call into.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use std::str::FromStr;
 
@@ -38,20 +38,32 @@ use syn::Item;
 /// Path-qualified calls (`crate::foo!()`, `other_crate::foo!()`,
 /// `<T>::foo!()`) are skipped: a path-qualified macro call is name-
 /// resolved and doesn't constrain the textual order of any local
-/// `macro_rules!`. Detected by checking whether the ident is
-/// immediately preceded by a `:` punct.
+/// `macro_rules!`. The path-qualified marker is **two** consecutive
+/// `:` puncts immediately before the ident (the `::` separator). A
+/// single `:` is *not* a marker — that's the struct-field-init or
+/// type-annotation syntax, e.g. `Foo { expr: bar!(...) }`, which is
+/// a perfectly normal local macro call site (regression: an earlier
+/// version checked only one position back and silently swallowed
+/// every `field: macro!(...)` use, observed on pest's
+/// optimizer/restorer.rs `box_tree!` test fixtures).
 pub(crate) fn find_calls(ts: TokenStream, names: &HashSet<String>, found: &mut HashSet<String>) {
     let toks: Vec<TokenTree> = ts.into_iter().collect();
     for i in 0..toks.len() {
         if let TokenTree::Ident(id) = &toks[i] {
             if let Some(TokenTree::Punct(p)) = toks.get(i + 1) {
                 if p.as_char() == '!' {
-                    let preceded_by_colon = i
+                    let prev_is_colon = i
                         .checked_sub(1)
                         .and_then(|j| toks.get(j))
                         .map(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ':'))
                         .unwrap_or(false);
-                    if !preceded_by_colon {
+                    let prev2_is_colon = i
+                        .checked_sub(2)
+                        .and_then(|j| toks.get(j))
+                        .map(|t| matches!(t, TokenTree::Punct(p) if p.as_char() == ':'))
+                        .unwrap_or(false);
+                    let path_qualified = prev_is_colon && prev2_is_colon;
+                    if !path_qualified {
                         let n = id.to_string();
                         if names.contains(&n) {
                             found.insert(n);
@@ -68,7 +80,7 @@ pub(crate) fn find_calls(ts: TokenStream, names: &HashSet<String>, found: &mut H
 
 /// Names brought into local scope by any `use ... ::name;` whose
 /// final ident matches `local_macros`. Globs are conservatively
-/// ignored.
+/// ignored. For `use X as Y;` we record `Y` (the in-scope name).
 pub(crate) fn collect_use_leaves(
     tree: &syn::UseTree,
     local_macros: &HashSet<String>,
@@ -93,6 +105,45 @@ pub(crate) fn collect_use_leaves(
         Group(g) => {
             for inner in &g.items {
                 collect_use_leaves(inner, local_macros, out);
+            }
+        }
+    }
+}
+
+/// Names this `use` tree references *as source* (the leftmost ident
+/// of each leaf, before any rename) that match a local macro. This is
+/// the set the `use` statement depends on at parse time — `use foo as
+/// bar;` records `foo` even though only `bar` becomes the in-scope
+/// name. Used to make a `use` item act as a caller of the local
+/// `macro_rules! foo` so the yank pipeline keeps the macro above it.
+pub(crate) fn collect_use_source_names(
+    tree: &syn::UseTree,
+    local_macros: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    use syn::UseTree::*;
+    match tree {
+        Path(p) => collect_use_source_names(&p.tree, local_macros, out),
+        Name(n) => {
+            let s = n.ident.to_string();
+            if local_macros.contains(&s) {
+                out.insert(s);
+            }
+        }
+        Rename(r) => {
+            // Source ident, NOT the rename — the rename is the new
+            // name introduced into scope, but the constraint we care
+            // about is "the macro this use *resolves* to must be
+            // defined above us".
+            let s = r.ident.to_string();
+            if local_macros.contains(&s) {
+                out.insert(s);
+            }
+        }
+        Glob(_) => {}
+        Group(g) => {
+            for inner in &g.items {
+                collect_use_source_names(inner, local_macros, out);
             }
         }
     }
@@ -224,6 +275,11 @@ fn top_level_macro_rules_names(items: &[Item]) -> HashSet<String> {
 ///
 /// External mods whose child can't be opened/parsed conservatively
 /// stay as barriers (we can't prove they don't leak callers).
+///
+/// Sibling bare-call detection has to look inside external `mod
+/// NAME;` siblings (and their own external sub-mods, recursively)
+/// because the call to a `#[macro_use]`-leaked macro may live deep
+/// in another file — see `external_sibling_calls_any`.
 pub(crate) fn compute_macro_use_relevance(
     items: &[Item],
     item_streams: &[TokenStream],
@@ -265,16 +321,46 @@ pub(crate) fn compute_macro_use_relevance(
             continue;
         }
         // Any sibling bare-call of an exported name keeps the barrier.
+        // For inline siblings the item's own token stream already
+        // contains the body, so a normal `find_calls` covers them. For
+        // external `mod NAME;` siblings the token stream is just the
+        // declaration — we have to open the child file and recurse
+        // (bounded by `MAX_MACRO_USE_SCAN_DEPTH` so a pathological
+        // mod tree can't make us walk forever). On IO/parse failure
+        // or depth cap, fall back to "needed=true" so the barrier
+        // stays in place.
         let mut needed = false;
-        for (j, ts) in item_streams.iter().enumerate() {
+        // Canonical paths of files already scanned for THIS `#[macro_use]
+        // mod`. Shared across all sibling iterations so two siblings that
+        // resolve to the same file (via `#[path]` alias or symlink) are
+        // scanned only once, and a `#[path]` cycle terminates immediately
+        // instead of having to bottom out on the depth cap.
+        let mut scan_visited: HashSet<PathBuf> = HashSet::new();
+        for (j, item) in items.iter().enumerate() {
             if j == idx {
                 continue;
             }
             let mut found: HashSet<String> = HashSet::new();
-            find_calls(ts.clone(), &exported, &mut found);
+            find_calls(item_streams[j].clone(), &exported, &mut found);
             if !found.is_empty() {
                 needed = true;
                 break;
+            }
+            if let Item::Mod(other) = item {
+                if other.content.is_none() {
+                    let Some(dir) = mod_dir else {
+                        needed = true;
+                        break;
+                    };
+                    let Some(other_path) = crate::discover::external_mod_file(dir, other) else {
+                        needed = true;
+                        break;
+                    };
+                    if external_sibling_calls_any(&other_path, &exported, &mut scan_visited, 1) {
+                        needed = true;
+                        break;
+                    }
+                }
             }
         }
         if needed {
@@ -286,6 +372,86 @@ pub(crate) fn compute_macro_use_relevance(
 
 fn has_macro_use_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("macro_use"))
+}
+
+/// Hard cap on how deep the macro_use sibling scan will descend
+/// through `mod foo;` -> child file -> its own `mod bar;` -> ... .
+/// This is the only recursive walk in the crate that needs a cap:
+/// it's the one bounded by file IO, and it has a safe conservative
+/// fallback ("might call any macro, keep the barrier") — capping it
+/// just trades a little optimisation for a hard upper bound on IO.
+/// Picked generously enough that real Rust crates never trip it;
+/// macro_use chains beyond a few hops are vanishingly rare.
+const MAX_MACRO_USE_SCAN_DEPTH: u32 = 16;
+
+/// Walk an external sibling mod's file (and its own external sub-mods,
+/// recursively up to [`MAX_MACRO_USE_SCAN_DEPTH`]) looking for any
+/// bare call of a name in `exported`. Returns `true` on the first
+/// match, and also `true` on any IO/parse failure or when the depth
+/// cap is hit — in those cases we can't prove the absence of calls,
+/// so the caller keeps the `#[macro_use] mod` as a barrier.
+///
+/// `visited` is the set of canonical file paths already scanned in
+/// this search context; it dedupes `#[path]` aliases pointing at the
+/// same physical file and breaks `#[path]`-induced cycles up front
+/// (without it we'd still bottom out on the depth cap, but we'd burn
+/// up to MAX_MACRO_USE_SCAN_DEPTH file opens to do it).
+///
+/// Inline `mod foo { ... }` children inside the visited file don't need
+/// extra recursion because their bodies are already part of the parent
+/// `Item`'s token stream (so `find_calls` covers them in one shot).
+fn external_sibling_calls_any(
+    file: &Path,
+    exported: &HashSet<String>,
+    visited: &mut HashSet<PathBuf>,
+    depth: u32,
+) -> bool {
+    if depth >= MAX_MACRO_USE_SCAN_DEPTH {
+        return true;
+    }
+    // Canonicalise to dedupe `#[path]` aliases / symlinks. A failure
+    // here is treated like a read failure (file probably doesn't
+    // exist) — fall back to the conservative "might call anything".
+    let canonical = match std::fs::canonicalize(file) {
+        Ok(p) => p,
+        Err(_) => return true,
+    };
+    if !visited.insert(canonical.clone()) {
+        // Already scanned this file in this search and didn't find a
+        // call — repeating the scan would give the same answer.
+        return false;
+    }
+    let Ok(src) = std::fs::read_to_string(&canonical) else {
+        return true;
+    };
+    let Ok(parsed) = syn::parse_file(&src) else {
+        return true;
+    };
+    let mod_dir = crate::discover::mod_directory(&canonical);
+    for item in &parsed.items {
+        let ts = {
+            use syn::__private::ToTokens;
+            let mut ts = TokenStream::new();
+            item.to_tokens(&mut ts);
+            ts
+        };
+        let mut found: HashSet<String> = HashSet::new();
+        find_calls(ts, exported, &mut found);
+        if !found.is_empty() {
+            return true;
+        }
+        if let Item::Mod(child) = item {
+            if child.content.is_none() {
+                let Some(child_path) = crate::discover::external_mod_file(&mod_dir, child) else {
+                    return true;
+                };
+                if external_sibling_calls_any(&child_path, exported, visited, depth + 1) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Stage 2: collect every `macro_rules! NAME` in source order. A `Vec`
@@ -338,6 +504,18 @@ pub(crate) fn collect_item_uses(
         }
         for name in &imported {
             found.remove(name);
+        }
+        // `use NAME;` (and re-exports like `pub(crate) use NAME;`)
+        // resolve `NAME` against the *textual* macro namespace when
+        // `NAME` is a local `macro_rules!` defined in this same scope.
+        // The `use` therefore requires the macro definition to come
+        // textually above it — make the use a caller so the yank
+        // fixpoint pulls the def up. Without this, reordering can move
+        // a `use macroname;` above its `macro_rules! macroname` and
+        // produce code that no longer compiles (observed on xh's
+        // src/formatting/palette.rs).
+        if let Item::Use(u) = item {
+            collect_use_source_names(&u.tree, macro_names, &mut found);
         }
         if !found.is_empty() {
             item_uses.insert(i, found);

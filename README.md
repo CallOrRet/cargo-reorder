@@ -419,6 +419,22 @@ Comments and attributes are preserved:
 - a comment block separated from the item below by a blank line is treated as
   trailing trivia of the item above — or, before the first item, as a
   file-level header that stays at the top
+- a `//` comment block surrounded by blank lines on **both** sides is a
+  *floating fence*: it stays anchored to its source position and items above
+  it are forbidden from reordering past items below it (and vice versa). Use
+  this to keep hand-written section dividers intact, e.g.
+  ```rust
+  // === public API ===
+
+  pub fn ...
+
+  // === helpers ===
+
+  fn ...
+  ```
+  Each section is sorted independently; the dividers don't move. Doc comments
+  (`///`, `//!`) are excluded from this rule because syn associates them with
+  the next item as attributes.
 - shebang lines and crate-level inner attributes (`#![...]`) always remain at
   the top of the file
 
