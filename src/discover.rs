@@ -124,6 +124,9 @@ fn cargo_target_entries(opts: DiscoverOptions<'_>) -> Result<Vec<PathBuf>> {
 }
 
 /// Recursively follow `mod foo;` declarations starting at `entry`.
+/// No depth cap — file discovery has to be exhaustive or we'd
+/// silently skip reordering deep modules. Canonical-path de-dup
+/// already prevents true cycles.
 fn walk_mod_tree(entry: &Path, found: &mut BTreeSet<PathBuf>) {
     let canonical = match fs::canonicalize(entry) {
         Ok(p) => p,
