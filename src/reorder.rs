@@ -80,7 +80,7 @@ impl fmt::Display for ReorderError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Category {
     ExternCrate,
     Use,
@@ -246,6 +246,23 @@ pub struct Config {
     /// Disable ordering shorter trait paths first
     /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
     pub no_short_trait_path_first: bool,
+    /// Disable reordering named fields inside `struct` / `union` /
+    /// `enum` (and inside enum variants). When on, fields are grouped
+    /// by their snake_case / PascalCase / camelCase first word, within
+    /// each group sorted shortest-name-first, and the groups are
+    /// emitted in ascending order of the group's mean name length
+    /// with a blank line between them. ABI- and semantics-affecting
+    /// shapes are always skipped: any `#[repr(...)]`, any
+    /// `#[derive(PartialOrd | Ord)]`, enums whose any variant carries
+    /// an explicit discriminant, and tuple/unit variants.
+    pub no_reorder_fields: bool,
+    /// Disable the prefix-group + length sort applied **inside `impl`
+    /// and `trait` bodies** (the const → type → fn → async fn category
+    /// order, plus the within-category prefix sort). When on, the body
+    /// of every `impl` / `trait` is left in the user's source order.
+    /// Field-level and top-level grouping are unaffected — those stay
+    /// under `no_reorder_fields`.
+    pub no_reorder_impl_fns: bool,
 }
 
 pub(crate) struct Block {
@@ -269,9 +286,14 @@ pub(crate) struct SortKey {
     segment: u32,
     /// Primary category weight.
     primary: u32,
-    /// Anchor index — for impls, the original index of their target type;
-    /// for normal items, their own original index.
-    anchor: usize,
+    /// Same-category grouping key: `(group_mean_proxy, name_len, idx)`.
+    /// Items in a category-eligible-for-grouping
+    /// (struct/union/enum/trait/fn/async-fn) get a key derived from
+    /// their name's prefix-group; impls inherit their target type's
+    /// key (so impls follow the type to its new sorted position).
+    /// Items not subject to grouping get `(0, 0, idx)`, which collapses
+    /// to a stable source-order sort within their category.
+    anchor: (u32, u32, usize),
     /// 0 = the type definition itself, 1 = a follower impl.
     follower: u8,
     /// Within a type's followers: inherent (0) → std trait (1) → external (2).
@@ -295,6 +317,11 @@ struct ScopeIndex<'a> {
     std_imports: &'a HashSet<String>,
     crate_imports: &'a HashSet<String>,
     local_traits: &'a HashSet<String>,
+    /// Per-item `(group_mean_proxy, name_len)` for items in
+    /// group-eligible top-level categories
+    /// (struct/union/enum/trait/fn/async-fn). Items not in the map
+    /// fall back to `(0, 0)` and sort by source order.
+    group_keys: &'a HashMap<usize, (u32, u32)>,
 }
 
 fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -384,6 +411,14 @@ fn collect_use_imports(
     }
 }
 
+/// Categories that participate in top-level same-category prefix-grouping.
+fn is_top_level_groupable(cat: Category) -> bool {
+    matches!(
+        cat,
+        Category::Struct | Category::Enum | Category::Trait | Category::Fn | Category::AsyncFn
+    )
+}
+
 /// Last segment of a `Type` path — the name an `impl` block targets.
 fn type_last_segment(ty: &syn::Type) -> Option<String> {
     match ty {
@@ -426,24 +461,28 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
         return Ok(format!("{prefix}{reordered}"));
     }
 
-    // Optional pre-pass: recursively reorder eligible inline mod bodies
-    // before tackling the file-level item order. Each recursive call
-    // handles its own further-nested inline mods, so we only need to
-    // process top-level inline mods here. We then re-parse the rewritten
-    // source so the rest of the pipeline sees the canonicalised bodies.
-    let owned: String;
-    let working: &str = if !cfg.no_reorder_inline_mods {
-        owned = recurse_inline_mods(source, cfg)?;
-        &owned
-    } else {
-        source
-    };
-
-    let parsed: File = syn::parse_file(working)?;
+    // Parse once up front, then optionally rewrite inline mod bodies
+    // recursively. When the inline-mod pass changes the source we have
+    // to re-parse the rewritten string; when it doesn't (the common
+    // case for files without inline mods, or with only skip-listed
+    // ones), we hand the original AST straight to the main pipeline.
+    let mut parsed: File = syn::parse_file(source)?;
     if parsed.items.is_empty() {
-        return Ok(working.to_string());
+        return Ok(source.to_string());
     }
-    let source = working;
+
+    let owned: Option<String> = if !cfg.no_reorder_inline_mods {
+        let new_source = recurse_inline_mods(source, &parsed, cfg)?;
+        if let Some(new_src) = new_source {
+            parsed = syn::parse_file(&new_src)?;
+            Some(new_src)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let source: &str = owned.as_deref().unwrap_or(source);
 
     let lines: Vec<&str> = split_keep_endings(source);
     let header_end_line = compute_header_end_line(&parsed);
@@ -473,25 +512,38 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // Trait names declared at the top of this file — `impl LocalTrait
     // for X` should classify as crate-trait, not external.
     let mut local_traits: HashSet<String> = HashSet::new();
+    // Per-category names for top-level group-sorting. We collect
+    // `(idx, name)` pairs bucketed by `Category`, then run
+    // `crate::fields::compute_group_keys` per bucket so each item gets
+    // a `(group_mean_proxy, name_len)` key derived only from
+    // same-category siblings.
+    let mut category_names: HashMap<Category, Vec<(usize, String)>> = HashMap::new();
     for (idx, item) in parsed.items.iter().enumerate() {
         let cat = Category::classify(item);
+        let mut record = |name: String| {
+            category_names
+                .entry(cat)
+                .or_default()
+                .push((idx, name.clone()));
+            name_index.insert(name, (idx, cat));
+        };
         match item {
-            Item::Struct(s) => {
-                name_index.insert(s.ident.to_string(), (idx, cat));
-            }
-            Item::Enum(e) => {
-                name_index.insert(e.ident.to_string(), (idx, cat));
-            }
-            Item::Union(u) => {
-                name_index.insert(u.ident.to_string(), (idx, cat));
-            }
+            Item::Struct(s) => record(s.ident.to_string()),
+            Item::Enum(e) => record(e.ident.to_string()),
+            Item::Union(u) => record(u.ident.to_string()),
             Item::Trait(t) => {
-                name_index.insert(t.ident.to_string(), (idx, cat));
                 local_traits.insert(t.ident.to_string());
+                record(t.ident.to_string());
             }
             Item::TraitAlias(t) => {
-                name_index.insert(t.ident.to_string(), (idx, cat));
                 local_traits.insert(t.ident.to_string());
+                record(t.ident.to_string());
+            }
+            Item::Fn(f) => {
+                category_names
+                    .entry(cat)
+                    .or_default()
+                    .push((idx, f.sig.ident.to_string()));
             }
             Item::Mod(m) => {
                 local_mods.insert(m.ident.to_string());
@@ -503,6 +555,20 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
                 &mut crate_imports,
             ),
             _ => {}
+        }
+    }
+    // Build per-item group keys. Only categories the user wants
+    // grouped get a non-zero key; other items fall back to `(0, 0)`.
+    let mut group_keys: HashMap<usize, (u32, u32)> = HashMap::new();
+    if !cfg.no_reorder_fields {
+        for (cat, names) in &category_names {
+            if !is_top_level_groupable(*cat) {
+                continue;
+            }
+            let keys = crate::fields::compute_group_keys(
+                names.iter().map(|(idx, name)| (*idx, name.as_str())),
+            );
+            group_keys.extend(keys);
         }
     }
 
@@ -553,6 +619,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
         std_imports: &std_imports,
         crate_imports: &crate_imports,
         local_traits: &local_traits,
+        group_keys: &group_keys,
     };
     let mut blocks: Vec<Block> = Vec::with_capacity(parsed.items.len());
     for (idx, (item, &(start, end))) in parsed.items.iter().zip(ranges.iter()).enumerate() {
@@ -562,6 +629,16 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
             String::new()
         };
         let body = take_lines(&lines, start, end);
+        let body = if cfg.no_reorder_fields {
+            body
+        } else if cfg.no_reorder_impl_fns && matches!(item, Item::Impl(_) | Item::Trait(_)) {
+            // `--no-reorder-impl-fns`: keep impl/trait bodies in
+            // source order. Field-level (struct/union/enum) reorder
+            // still runs — that's a separate pass.
+            body
+        } else {
+            crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+        };
         let category = Category::classify(item);
         let import_group = match item {
             Item::Use(u) => Some(ImportGroup::classify(u, &local_mods)),
@@ -635,7 +712,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
                 sort_key: SortKey {
                     segment: fence_segment,
                     primary: 0,
-                    anchor: 0,
+                    anchor: (0, 0, 0),
                     follower: 0,
                     impl_kind: 0,
                     trait_path_len: 0,
@@ -722,10 +799,14 @@ fn compute_sort_key(
             };
 
             if let Some((anchor_idx, anchor_cat)) = anchor {
+                // Inherit the target type's group key so impls follow
+                // their type to its new sorted position.
+                let (gk_mean, gk_len) =
+                    scope.group_keys.get(&anchor_idx).copied().unwrap_or((0, 0));
                 return SortKey {
                     segment,
                     primary: anchor_cat.weight(cfg),
-                    anchor: anchor_idx,
+                    anchor: (gk_mean, gk_len, anchor_idx),
                     follower: 1,
                     impl_kind: kind as u8,
                     trait_path_len,
@@ -738,7 +819,7 @@ fn compute_sort_key(
             return SortKey {
                 segment,
                 primary,
-                anchor: idx,
+                anchor: (0, 0, 0),
                 follower: 0,
                 impl_kind: kind as u8,
                 trait_path_len,
@@ -748,14 +829,18 @@ fn compute_sort_key(
         }
     }
 
-    // Only type definitions need a non-zero `anchor`, so that `impl` blocks
-    // can anchor to them. Other items use `anchor = 0` so within their
-    // category they fall through to `subgroup` / `original_index` for
-    // ordering — otherwise a `use` with smaller original_index would sort
-    // ahead of one in an earlier import group.
-    let anchor = match category {
-        Category::Struct | Category::Enum | Category::Trait => idx,
-        _ => 0,
+    // For top-level group-eligible categories
+    // (struct/union/enum/trait/fn/async-fn), use the precomputed
+    // `(group_mean_proxy, name_len, idx)` triple so same-category
+    // siblings sort by prefix-group + length + source order. Other
+    // items get `(0, 0, 0)` so they all tie on anchor and fall
+    // through to `subgroup` / `original_index` — preserving e.g. the
+    // `pub_mod_first` secondary-sort path for `mod` items.
+    let anchor = if is_top_level_groupable(category) {
+        let (mean, len) = scope.group_keys.get(&idx).copied().unwrap_or((0, 0));
+        (mean, len, idx)
+    } else {
+        (0, 0, 0)
     };
 
     // `import_group` field on SortKey is reused as a generic "secondary sort
@@ -825,8 +910,19 @@ fn should_skip_inline_recursion(m: &syn::ItemMod, items: &[Item]) -> bool {
 /// at the current scope, returning a rewritten source string. Each
 /// recursive `reorder_inner` call handles its own nested inline mods,
 /// so we only walk one level here.
-fn recurse_inline_mods(source: &str, cfg: &Config) -> Result<String, ReorderError> {
-    let parsed: File = syn::parse_file(source)?;
+/// Visit each top-level inline mod body and recursively reorder it.
+/// Takes the already-parsed `File` to avoid a redundant parse —
+/// `reorder_inner` will need its own `parsed` next anyway, and when
+/// no inline mod actually changes (the common case) we can hand that
+/// same AST back so the caller skips re-parsing entirely.
+///
+/// Returns `Ok(None)` when nothing changed; `Ok(Some(new_source))`
+/// when at least one inline mod body was rewritten.
+fn recurse_inline_mods(
+    source: &str,
+    parsed: &File,
+    cfg: &Config,
+) -> Result<Option<String>, ReorderError> {
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for item in &parsed.items {
         let Item::Mod(m) = item else { continue };
@@ -850,11 +946,14 @@ fn recurse_inline_mods(source: &str, cfg: &Config) -> Result<String, ReorderErro
             replacements.push((body_start, body_end, new_body));
         }
     }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
     // Apply in reverse byte order so earlier offsets stay valid.
     replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut out = source.to_string();
     for (start, end, body) in replacements {
         out.replace_range(start..end, &body);
     }
-    Ok(out)
+    Ok(Some(out))
 }
