@@ -31,8 +31,8 @@
 
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Fields, FieldsNamed, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, ItemTrait,
-    ItemUnion, TraitItem,
+    Attribute, Fields, FieldsNamed, GenericParam, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct,
+    ItemTrait, ItemUnion, TraitBoundModifier, TraitItem, TypeParamBound, WherePredicate,
 };
 
 /// Top-level entry point: given a parsed item and its raw source text,
@@ -56,14 +56,20 @@ fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<
     let Fields::Named(named) = &s.fields else {
         return None;
     };
-    rewrite_named_fields_inplace(body_text, start_line, named)
+    // DST layout: at most one unsized field, and it must be last. The
+    // user's source already has the unsized field last (it wouldn't
+    // compile otherwise), so pin the last named field in place and let
+    // the rest reorder normally.
+    let pin_last = has_unsized_generic(&s.generics);
+    rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
 }
 
 fn rewrite_union(u: &ItemUnion, body_text: &str, start_line: usize) -> Option<String> {
     if container_skips(&u.attrs) {
         return None;
     }
-    rewrite_named_fields_inplace(body_text, start_line, &u.fields)
+    let pin_last = has_unsized_generic(&u.generics);
+    rewrite_named_fields_inplace(body_text, start_line, &u.fields, pin_last)
 }
 
 fn rewrite_impl(item: &ItemImpl, body_text: &str, start_line: usize) -> Option<String> {
@@ -161,7 +167,9 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
             let line_range = field_block_line_range(&out, start_line, named);
             if let Some((line_lo, line_hi)) = line_range {
                 let block_text = lines_slice(&out, start_line, line_lo, line_hi);
-                if let Some(rewritten) = rewrite_named_fields_inplace(&block_text, line_lo, named) {
+                if let Some(rewritten) =
+                    rewrite_named_fields_inplace(&block_text, line_lo, named, false)
+                {
                     let (lo_byte, hi_byte) =
                         byte_range_for_line_range(&out, start_line, line_lo, line_hi);
                     variant_rewrites.push((lo_byte, hi_byte, rewritten));
@@ -182,6 +190,8 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
     // the entries' `first_line` / `last_line` are 1-indexed within
     // `out`, not within the surrounding source file.
     let parsed: ItemEnum = syn::parse_str(&out).ok()?;
+    // serde-derive forces `#[serde(other)]` to be on the last variant;
+    // pin that variant in place and reorder only its predecessors.
     sort_top_level(
         &out,
         1,
@@ -197,26 +207,31 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
                 first_line,
                 last_line,
                 name,
-                bucket: 0,
+                bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
             }
         }),
     )
 }
 
 /// Take a named-fields block (`{ a: u8, b: u16 }`) and rewrite the
-/// containing item's text with the fields reordered.
+/// containing item's text with the fields reordered. When `pin_last`
+/// is true, the final field stays in place and only the prefix is
+/// reordered — used for DST layouts where the trailing field must
+/// remain last (`?Sized`, `[T]`, `str`, `dyn Trait`).
 fn rewrite_named_fields_inplace(
     text: &str,
     text_start_line: usize,
     named: &FieldsNamed,
+    pin_last: bool,
 ) -> Option<String> {
     if named.named.len() < 2 {
         return None;
     }
+    let last_idx = named.named.len() - 1;
     sort_top_level(
         text,
         text_start_line,
-        named.named.iter().map(|f| {
+        named.named.iter().enumerate().map(|(i, f)| {
             let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let earliest_attr = f.attrs.first().map(|a| a.span());
             let span = f.span();
@@ -228,7 +243,7 @@ fn rewrite_named_fields_inplace(
                 first_line,
                 last_line,
                 name,
-                bucket: 0,
+                bucket: if pin_last && i == last_idx { PIN_LAST } else { 0 },
             }
         }),
     )
@@ -380,6 +395,12 @@ where
     Some(format!("{header}{body}{footer}"))
 }
 
+/// Sentinel bucket value that pins an entry to the very end of the
+/// reordered output. Used for fields/variants that must keep their
+/// trailing position for semantic reasons (DST layout for `?Sized`
+/// fields, `#[serde(other)]` on enum variants).
+const PIN_LAST: u8 = u8::MAX;
+
 #[derive(Clone)]
 struct SortableLines {
     first_line: usize,
@@ -388,7 +409,8 @@ struct SortableLines {
     /// Sub-bucket within the entry list. Items in lower buckets sort
     /// before items in higher buckets, regardless of their group's
     /// mean. Used by impl/trait body reordering to keep `async fn`
-    /// after sync `fn`. Field-level callers always pass `0`.
+    /// after sync `fn`. Field-level callers usually pass `0`; the
+    /// special value [`PIN_LAST`] pins the entry to the end.
     bucket: u8,
 }
 
@@ -521,6 +543,57 @@ fn byte_range_for_line_range(
         end_byte += l.len();
     }
     (byte, end_byte)
+}
+
+/// True if the container's generics carry a `?Sized` bound — either as a
+/// direct param bound (`<T: ?Sized>`) or in a `where` clause
+/// (`where T: ?Sized`). DST layout pins the unsized field as the last
+/// field of the struct/union, so we must not reorder named fields when
+/// the type can be unsized.
+fn has_unsized_generic(generics: &syn::Generics) -> bool {
+    let bounds_have_maybe_sized = |bounds: &syn::punctuated::Punctuated<TypeParamBound, _>| {
+        bounds.iter().any(|b| match b {
+            TypeParamBound::Trait(t) => {
+                matches!(t.modifier, TraitBoundModifier::Maybe(_)) && t.path.is_ident("Sized")
+            }
+            _ => false,
+        })
+    };
+    let direct = generics.params.iter().any(|p| match p {
+        GenericParam::Type(t) => bounds_have_maybe_sized(&t.bounds),
+        _ => false,
+    });
+    if direct {
+        return true;
+    }
+    generics
+        .where_clause
+        .as_ref()
+        .is_some_and(|w| {
+            w.predicates.iter().any(|p| match p {
+                WherePredicate::Type(pt) => bounds_have_maybe_sized(&pt.bounds),
+                _ => false,
+            })
+        })
+}
+
+/// True if the variant carries a serde-derive attribute that requires it
+/// to stay in a fixed position. Currently: `#[serde(other)]` must be on
+/// the last variant of an externally-tagged enum.
+fn variant_pinned_last(v: &syn::Variant) -> bool {
+    v.attrs.iter().any(|a| {
+        if !a.path().is_ident("serde") {
+            return false;
+        }
+        let mut found = false;
+        let _ = a.parse_nested_meta(|meta| {
+            if meta.path.is_ident("other") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
 }
 
 fn container_skips(attrs: &[Attribute]) -> bool {

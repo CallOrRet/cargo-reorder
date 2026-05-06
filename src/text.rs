@@ -46,9 +46,37 @@ pub(crate) fn split_at_last_blank(region: &str) -> (String, String) {
         return (String::new(), String::new());
     }
     let lines = split_keep_endings(region);
+    // Track whether each line *starts* inside an unclosed `/* ... */`
+    // block comment. We must never split between two halves of a block
+    // comment — the `/*` and the `*/` would end up in different items'
+    // trivia, and a reorder could insert real code between them, eating
+    // it into the comment. (Real-world repro: nom's src/internal.rs.)
+    let mut in_block = vec![false; lines.len()];
+    let mut depth = 0i32;
+    for (i, line) in lines.iter().enumerate() {
+        in_block[i] = depth > 0;
+        let bytes = line.as_bytes();
+        let mut j = 0;
+        while j + 1 < bytes.len() {
+            if depth == 0 && bytes[j] == b'/' && bytes[j + 1] == b'/' {
+                break;
+            }
+            if bytes[j] == b'/' && bytes[j + 1] == b'*' {
+                depth += 1;
+                j += 2;
+                continue;
+            }
+            if depth > 0 && bytes[j] == b'*' && bytes[j + 1] == b'/' {
+                depth -= 1;
+                j += 2;
+                continue;
+            }
+            j += 1;
+        }
+    }
     let mut split_idx = 0usize;
     for i in (0..lines.len()).rev() {
-        if line_is_blank(lines[i]) {
+        if line_is_blank(lines[i]) && !in_block[i] {
             split_idx = i + 1;
             break;
         }

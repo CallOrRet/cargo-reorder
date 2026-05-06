@@ -727,13 +727,16 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     blocks.sort_by_key(|b| b.sort_key);
 
     let header = take_lines(&lines, 1, header_end_line);
-    Ok(crate::emit::assemble(
-        &header,
-        &header_extra,
-        &blocks,
-        &footer,
-        cfg,
-    ))
+    let assembled = crate::emit::assemble(&header, &header_extra, &blocks, &footer, cfg);
+    // Self-check: if the rewritten source no longer parses (a structural
+    // bug like an impl-block boundary or a `/* ... */` block comment in
+    // the gap between items got scrambled), fall back to the input
+    // rather than emit syntactically broken Rust. Caller-visible: the
+    // file is left untouched on this kind of edge case.
+    if assembled != source && syn::parse_file(&assembled).is_err() {
+        return Ok(source.to_string());
+    }
+    Ok(assembled)
 }
 
 #[allow(clippy::too_many_arguments)]
