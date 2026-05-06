@@ -10,11 +10,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use walkdir::WalkDir;
 
+use cargo_reorder::ReorderError;
 use cargo_reorder::diagnostic::{
     Color as DiagColor, format_parse_error_colored, write_diff_colored,
 };
 use cargo_reorder::discover::{DiscoverOptions, discover};
-use cargo_reorder::reorder::ReorderError;
 use cargo_reorder::{Config, reorder_source_with, reorder_source_with_path};
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

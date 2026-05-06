@@ -414,30 +414,25 @@ pub fn reorder_source_with(source: &str, cfg: &Config) -> Result<String, Reorder
     reorder_source_with_path(source, None, cfg)
 }
 
-/// Reorder. When `source_path` is provided, the macro constraint pass
-/// opens each child mod file and only constrains the position of macros
-/// the child actually uses; otherwise every external `mod foo;` is
-/// conservatively treated as a potential caller.
+/// Reorder. `source_path` is accepted for API compatibility (and so a
+/// caller can identify the file in any future path-aware behaviour),
+/// but the current implementation does not consult it — every macro
+/// item is a barrier regardless of where the file lives.
 pub fn reorder_source_with_path(
     source: &str,
-    source_path: Option<&std::path::Path>,
+    _source_path: Option<&std::path::Path>,
     cfg: &Config,
 ) -> Result<String, ReorderError> {
-    let mod_dir = source_path.map(crate::discover::mod_directory);
-    reorder_with_mod_dir(source, mod_dir.as_deref(), cfg)
+    reorder_inner(source, cfg)
 }
 
-/// Internal entry point that takes the resolved mod-directory directly.
-/// Inline-mod recursion calls this with the synthesized child directory
-/// so its `mod foo;` declarations resolve to the correct files.
-fn reorder_with_mod_dir(
-    source: &str,
-    mod_dir: Option<&std::path::Path>,
-    cfg: &Config,
-) -> Result<String, ReorderError> {
+/// Internal entry point. Recurses into itself for cargo-script
+/// frontmatter stripping and (when `cfg.reorder_inline_mods` is on)
+/// for inline `mod foo { ... }` body recursion.
+fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // Cargo-script: strip frontmatter, reorder body, stitch back.
     if let Some((prefix, body)) = crate::frontmatter::split(source) {
-        let reordered = reorder_with_mod_dir(&body, mod_dir, cfg)?;
+        let reordered = reorder_inner(&body, cfg)?;
         return Ok(format!("{prefix}{reordered}"));
     }
 
@@ -448,7 +443,7 @@ fn reorder_with_mod_dir(
     // source so the rest of the pipeline sees the canonicalised bodies.
     let owned: String;
     let working: &str = if cfg.reorder_inline_mods {
-        owned = recurse_inline_mods(source, mod_dir, cfg)?;
+        owned = recurse_inline_mods(source, cfg)?;
         &owned
     } else {
         source
@@ -854,21 +849,9 @@ fn should_skip_inline_recursion(m: &syn::ItemMod, items: &[Item]) -> bool {
 
 /// Recursively reorder bodies of every eligible inline `mod foo { ... }`
 /// at the current scope, returning a rewritten source string. Each
-/// recursive `reorder_with_mod_dir` call handles its own nested inline
-/// mods, so we only walk one level here.
-///
-/// `mod_dir` is the enclosing scope's mod-directory. For each inline
-/// mod we recurse into, the child's mod-directory is `mod_dir / <name>`
-/// (or `mod_dir / parent-of(#[path])` if `#[path = "..."]` is set on
-/// the inline mod). Threading it lets the macro-caller scan inside the
-/// recursed body open the correct child files instead of falling back
-/// to the conservative "every external `mod` could call every macro"
-/// rule.
-fn recurse_inline_mods(
-    source: &str,
-    mod_dir: Option<&std::path::Path>,
-    cfg: &Config,
-) -> Result<String, ReorderError> {
+/// recursive `reorder_inner` call handles its own nested inline mods,
+/// so we only walk one level here.
+fn recurse_inline_mods(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     let parsed: File = syn::parse_file(source)?;
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for item in &parsed.items {
@@ -888,9 +871,7 @@ fn recurse_inline_mods(
             continue; // synthesised span we can't trust — leave alone
         }
         let body = &source[body_start..body_end];
-        let child_dir: Option<std::path::PathBuf> =
-            mod_dir.map(|d| crate::discover::inline_mod_dir(d, m));
-        let new_body = reorder_with_mod_dir(body, child_dir.as_deref(), cfg)?;
+        let new_body = reorder_inner(body, cfg)?;
         if new_body != body {
             replacements.push((body_start, body_end, new_body));
         }

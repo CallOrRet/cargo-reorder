@@ -150,7 +150,7 @@ fn walk_mod_tree(entry: &Path, found: &mut BTreeSet<PathBuf>) {
 /// rustc's "mod directory" rule: for `lib.rs` / `main.rs` / `mod.rs` /
 /// `build.rs`, submodule files live in the same directory; for any other
 /// `name.rs`, they live in a sibling `name/` directory.
-pub(crate) fn mod_directory(file: &Path) -> PathBuf {
+fn mod_directory(file: &Path) -> PathBuf {
     let stem = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -184,7 +184,7 @@ fn walk_items(items: &[Item], mod_dir: &Path, found: &mut BTreeSet<PathBuf>) {
 ///
 /// Honours `#[path = "..."]`. Without it, tries `<mod_dir>/<name>.rs`
 /// then `<mod_dir>/<name>/mod.rs` — rustc's two conventional forms.
-pub(crate) fn external_mod_file(mod_dir: &Path, m: &syn::ItemMod) -> Option<PathBuf> {
+fn external_mod_file(mod_dir: &Path, m: &syn::ItemMod) -> Option<PathBuf> {
     if let Some(rel) = path_attribute(&m.attrs) {
         let candidate = mod_dir.join(rel);
         return candidate.is_file().then_some(candidate);
@@ -204,7 +204,7 @@ pub(crate) fn external_mod_file(mod_dir: &Path, m: &syn::ItemMod) -> Option<Path
 /// Synthesise the mod-directory for an inline `mod foo { ... }` body.
 /// `<parent>/<name>/`, or `<parent>/<dir(rel)>` when `#[path = "rel"]`
 /// is set on the inline mod.
-pub(crate) fn inline_mod_dir(parent_dir: &Path, m: &syn::ItemMod) -> PathBuf {
+fn inline_mod_dir(parent_dir: &Path, m: &syn::ItemMod) -> PathBuf {
     if let Some(rel) = path_attribute(&m.attrs) {
         return PathBuf::from(&rel)
             .parent()
@@ -214,7 +214,7 @@ pub(crate) fn inline_mod_dir(parent_dir: &Path, m: &syn::ItemMod) -> PathBuf {
     parent_dir.join(m.ident.to_string())
 }
 
-pub(crate) fn path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
+fn path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
     for a in attrs {
         if !a.path().is_ident("path") {
             continue;

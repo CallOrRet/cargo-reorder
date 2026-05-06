@@ -27,10 +27,10 @@ pub use reorder::{
 
 pub mod diagnostic;
 pub mod discover;
-pub mod imports;
-pub mod reorder;
 
 mod emit;
 mod frontmatter;
+mod imports;
 mod macros;
+mod reorder;
 mod text;
