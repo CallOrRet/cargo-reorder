@@ -298,7 +298,7 @@ struct SortableLines {
 /// OR up to the first lowercase→uppercase boundary (camelCase/PascalCase).
 /// Ensures `foo_bar` → "foo", `FooBar` → "Foo", `fooBar` → "foo",
 /// while leaving `Foo`, `BAR`, `XMLParser` as a single word.
-fn prefix_of(name: &str) -> &str {
+pub(crate) fn prefix_of(name: &str) -> &str {
     let mut prev_was_lower = false;
     for (i, c) in name.char_indices() {
         if c == '_' {
@@ -310,6 +310,53 @@ fn prefix_of(name: &str) -> &str {
         prev_was_lower = c.is_lowercase();
     }
     name
+}
+
+/// Compute a per-item sort key `(group_mean_x_count, name_len)` for
+/// each `(idx, name)` pair, where:
+/// - All items sharing the same `prefix_of(name)` form one group.
+/// - The group's first key component is its mean name length expressed
+///   as `sum_of_lens` (so the *order* of groups by mean matches integer
+///   ordering of `sum_of_lens / count`, which we cross-multiply to keep
+///   integers exact at compare time).
+///
+/// To allow direct use of the returned `(u32, u32)` as a `SortKey`
+/// component while still ordering by mean, we encode the mean as a
+/// fixed-point integer: `sum * 1_000_000 / count` (clamped to u32
+/// range). Comparing these integers gives the same order as comparing
+/// the true means.
+///
+/// `name_len` is the second component, used as the in-group secondary
+/// key: shorter names sort first within a group.
+///
+/// Items whose name is empty produce a `(u32::MAX, 0)` key so they
+/// sort to the end of their bucket — but in practice all callers pass
+/// non-empty names.
+pub(crate) fn compute_group_keys<'a, I>(items: I) -> std::collections::HashMap<usize, (u32, u32)>
+where
+    I: IntoIterator<Item = (usize, &'a str)>,
+{
+    let items: Vec<(usize, &'a str)> = items.into_iter().collect();
+    let mut groups: std::collections::HashMap<&'a str, (u64, u32)> =
+        std::collections::HashMap::new();
+    for (_, name) in &items {
+        let entry = groups.entry(prefix_of(name)).or_insert((0u64, 0u32));
+        entry.0 += name.len() as u64;
+        entry.1 += 1;
+    }
+    let mut out = std::collections::HashMap::with_capacity(items.len());
+    for (idx, name) in items {
+        let pfx = prefix_of(name);
+        let (sum, count) = groups[pfx];
+        // Encode mean as sum * 1_000_000 / count for fixed-point ordering.
+        let mean_proxy = if count == 0 {
+            0
+        } else {
+            ((sum as u128 * 1_000_000) / count as u128).min(u32::MAX as u128) as u32
+        };
+        out.insert(idx, (mean_proxy, name.len() as u32));
+    }
+    out
 }
 
 /// Split `text` into lines, each retaining its trailing `\n` if any.
@@ -396,4 +443,3 @@ fn container_skips(attrs: &[Attribute]) -> bool {
         false
     })
 }
-

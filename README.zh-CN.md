@@ -332,7 +332,12 @@ cargo build --release --bin sample-stats
 
 ## 关于 `--no-reorder-fields`
 
-默认情况下 cargo-reorder 不只动顶层 item，还会对**每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段**做分组排序：
+默认情况下 cargo-reorder 在**两个层面**用同一套分组规则：
+
+- **字段级**：每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段
+- **顶层（同类内部）**：连续的顶层 `struct` / `union` / `enum` / `trait` / `fn` / `async fn` 之间，同类 item 按同样的"前缀分组 + 长度"规则重排。`impl` 块跟随它锚定的类型一起移动，所以 `struct Foo` + `impl Foo` 始终连在一起
+
+两个层面共用的规则：
 
 1. **按"首词"分组**：
    - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
@@ -355,9 +360,9 @@ struct Foo {                  struct Foo {
                               }
 ```
 
-加 `--no-reorder-fields` 关掉这一遍（顶层 item 仍然排序，只是每个 `struct` / `union` / `enum` 的内部保持原样）。
+加 `--no-reorder-fields` 同时关掉两层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部也保持原样。
 
-工具会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
+字段级 pass 会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
 
 | 模式 | 跳过原因 |
 | --- | --- |

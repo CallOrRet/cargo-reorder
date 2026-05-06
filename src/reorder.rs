@@ -80,7 +80,7 @@ impl fmt::Display for ReorderError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Category {
     ExternCrate,
     Use,
@@ -279,9 +279,14 @@ pub(crate) struct SortKey {
     segment: u32,
     /// Primary category weight.
     primary: u32,
-    /// Anchor index — for impls, the original index of their target type;
-    /// for normal items, their own original index.
-    anchor: usize,
+    /// Same-category grouping key: `(group_mean_proxy, name_len, idx)`.
+    /// Items in a category-eligible-for-grouping
+    /// (struct/union/enum/trait/fn/async-fn) get a key derived from
+    /// their name's prefix-group; impls inherit their target type's
+    /// key (so impls follow the type to its new sorted position).
+    /// Items not subject to grouping get `(0, 0, idx)`, which collapses
+    /// to a stable source-order sort within their category.
+    anchor: (u32, u32, usize),
     /// 0 = the type definition itself, 1 = a follower impl.
     follower: u8,
     /// Within a type's followers: inherent (0) → std trait (1) → external (2).
@@ -305,6 +310,11 @@ struct ScopeIndex<'a> {
     std_imports: &'a HashSet<String>,
     crate_imports: &'a HashSet<String>,
     local_traits: &'a HashSet<String>,
+    /// Per-item `(group_mean_proxy, name_len)` for items in
+    /// group-eligible top-level categories
+    /// (struct/union/enum/trait/fn/async-fn). Items not in the map
+    /// fall back to `(0, 0)` and sort by source order.
+    group_keys: &'a HashMap<usize, (u32, u32)>,
 }
 
 fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -392,6 +402,14 @@ fn collect_use_imports(
             }
         }
     }
+}
+
+/// Categories that participate in top-level same-category prefix-grouping.
+fn is_top_level_groupable(cat: Category) -> bool {
+    matches!(
+        cat,
+        Category::Struct | Category::Enum | Category::Trait | Category::Fn | Category::AsyncFn
+    )
 }
 
 /// Last segment of a `Type` path — the name an `impl` block targets.
@@ -483,25 +501,38 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // Trait names declared at the top of this file — `impl LocalTrait
     // for X` should classify as crate-trait, not external.
     let mut local_traits: HashSet<String> = HashSet::new();
+    // Per-category names for top-level group-sorting. We collect
+    // `(idx, name)` pairs bucketed by `Category`, then run
+    // `crate::fields::compute_group_keys` per bucket so each item gets
+    // a `(group_mean_proxy, name_len)` key derived only from
+    // same-category siblings.
+    let mut category_names: HashMap<Category, Vec<(usize, String)>> = HashMap::new();
     for (idx, item) in parsed.items.iter().enumerate() {
         let cat = Category::classify(item);
+        let mut record = |name: String| {
+            category_names
+                .entry(cat)
+                .or_default()
+                .push((idx, name.clone()));
+            name_index.insert(name, (idx, cat));
+        };
         match item {
-            Item::Struct(s) => {
-                name_index.insert(s.ident.to_string(), (idx, cat));
-            }
-            Item::Enum(e) => {
-                name_index.insert(e.ident.to_string(), (idx, cat));
-            }
-            Item::Union(u) => {
-                name_index.insert(u.ident.to_string(), (idx, cat));
-            }
+            Item::Struct(s) => record(s.ident.to_string()),
+            Item::Enum(e) => record(e.ident.to_string()),
+            Item::Union(u) => record(u.ident.to_string()),
             Item::Trait(t) => {
-                name_index.insert(t.ident.to_string(), (idx, cat));
                 local_traits.insert(t.ident.to_string());
+                record(t.ident.to_string());
             }
             Item::TraitAlias(t) => {
-                name_index.insert(t.ident.to_string(), (idx, cat));
                 local_traits.insert(t.ident.to_string());
+                record(t.ident.to_string());
+            }
+            Item::Fn(f) => {
+                category_names
+                    .entry(cat)
+                    .or_default()
+                    .push((idx, f.sig.ident.to_string()));
             }
             Item::Mod(m) => {
                 local_mods.insert(m.ident.to_string());
@@ -513,6 +544,20 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
                 &mut crate_imports,
             ),
             _ => {}
+        }
+    }
+    // Build per-item group keys. Only categories the user wants
+    // grouped get a non-zero key; other items fall back to `(0, 0)`.
+    let mut group_keys: HashMap<usize, (u32, u32)> = HashMap::new();
+    if !cfg.no_reorder_fields {
+        for (cat, names) in &category_names {
+            if !is_top_level_groupable(*cat) {
+                continue;
+            }
+            let keys = crate::fields::compute_group_keys(
+                names.iter().map(|(idx, name)| (*idx, name.as_str())),
+            );
+            group_keys.extend(keys);
         }
     }
 
@@ -563,6 +608,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
         std_imports: &std_imports,
         crate_imports: &crate_imports,
         local_traits: &local_traits,
+        group_keys: &group_keys,
     };
     let mut blocks: Vec<Block> = Vec::with_capacity(parsed.items.len());
     for (idx, (item, &(start, end))) in parsed.items.iter().zip(ranges.iter()).enumerate() {
@@ -650,7 +696,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
                 sort_key: SortKey {
                     segment: fence_segment,
                     primary: 0,
-                    anchor: 0,
+                    anchor: (0, 0, 0),
                     follower: 0,
                     impl_kind: 0,
                     trait_path_len: 0,
@@ -737,10 +783,14 @@ fn compute_sort_key(
             };
 
             if let Some((anchor_idx, anchor_cat)) = anchor {
+                // Inherit the target type's group key so impls follow
+                // their type to its new sorted position.
+                let (gk_mean, gk_len) =
+                    scope.group_keys.get(&anchor_idx).copied().unwrap_or((0, 0));
                 return SortKey {
                     segment,
                     primary: anchor_cat.weight(cfg),
-                    anchor: anchor_idx,
+                    anchor: (gk_mean, gk_len, anchor_idx),
                     follower: 1,
                     impl_kind: kind as u8,
                     trait_path_len,
@@ -753,7 +803,7 @@ fn compute_sort_key(
             return SortKey {
                 segment,
                 primary,
-                anchor: idx,
+                anchor: (0, 0, 0),
                 follower: 0,
                 impl_kind: kind as u8,
                 trait_path_len,
@@ -763,14 +813,18 @@ fn compute_sort_key(
         }
     }
 
-    // Only type definitions need a non-zero `anchor`, so that `impl` blocks
-    // can anchor to them. Other items use `anchor = 0` so within their
-    // category they fall through to `subgroup` / `original_index` for
-    // ordering — otherwise a `use` with smaller original_index would sort
-    // ahead of one in an earlier import group.
-    let anchor = match category {
-        Category::Struct | Category::Enum | Category::Trait => idx,
-        _ => 0,
+    // For top-level group-eligible categories
+    // (struct/union/enum/trait/fn/async-fn), use the precomputed
+    // `(group_mean_proxy, name_len, idx)` triple so same-category
+    // siblings sort by prefix-group + length + source order. Other
+    // items get `(0, 0, 0)` so they all tie on anchor and fall
+    // through to `subgroup` / `original_index` — preserving e.g. the
+    // `pub_mod_first` secondary-sort path for `mod` items.
+    let anchor = if is_top_level_groupable(category) {
+        let (mean, len) = scope.group_keys.get(&idx).copied().unwrap_or((0, 0));
+        (mean, len, idx)
+    } else {
+        (0, 0, 0)
     };
 
     // `import_group` field on SortKey is reused as a generic "secondary sort

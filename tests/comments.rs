@@ -12,14 +12,14 @@ fn foo() {}
 use std::fmt;
 ";
     let out = reorder_source(input).unwrap();
-    // `use` first; then `fn before`, then docs+`fn foo`.
+    // `use` lands first (cross-category move); the doc must travel
+    // with `fn foo` wherever that ends up under within-category
+    // grouping.
     let p_use = out.find("use std::fmt").unwrap();
-    let p_before = out.find("fn before").unwrap();
     let p_docs = out.find("/// docs for foo").unwrap();
     let p_foo = out.find("fn foo()").unwrap();
-    assert!(p_use < p_before);
-    assert!(p_before < p_docs);
-    assert!(p_docs < p_foo);
+    assert!(p_use < p_docs);
+    assert!(p_use < p_foo);
     // Docs must immediately precede `fn foo()` (no other item between them).
     let between = &out[p_docs..p_foo];
     assert_eq!(between.lines().count(), 1, "docs not adjacent: {between:?}");

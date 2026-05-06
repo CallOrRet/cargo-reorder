@@ -435,9 +435,19 @@ Strongly trait-first. Default is trait-first; pass
 
 ## On `--no-reorder-fields`
 
-By default cargo-reorder also rearranges the **named fields** inside
-each `struct` / `union`, the named fields inside each struct-like
-enum variant, and the variants of each `enum`. The rules:
+By default cargo-reorder applies the same grouping rule at **two
+levels**:
+
+- **Field-level**: named fields inside each `struct` / `union`,
+  named fields inside each struct-like enum variant, and the
+  variants of each `enum`.
+- **Top-level (within category)**: among consecutive top-level
+  `struct` / `union` / `enum` / `trait` / `fn` / `async fn` items,
+  same-category siblings are reordered by the same prefix-grouping +
+  length rules. An `impl` block follows whichever type it anchors
+  to, so `struct Foo` + `impl Foo` stays together when `Foo` moves.
+
+The rules in both cases:
 
 1. **Group** by the identifier's first "word":
    - For snake_case: text up to the first `_` (`foo_bar` → `foo`).
@@ -466,12 +476,12 @@ struct Foo {                  struct Foo {
                               }
 ```
 
-Pass `--no-reorder-fields` to disable the pass entirely (the
-top-level item reorder still runs, just the inside of each
-`struct` / `union` / `enum` is left exactly as written).
+Pass `--no-reorder-fields` to disable both passes — top-level items
+fall back to category-then-source-order, and the inside of each
+`struct` / `union` / `enum` is left exactly as written.
 
-The pass automatically **skips** any item whose layout or derived
-semantics would change with reordering:
+The field-level pass automatically **skips** any item whose layout
+or derived semantics would change with reordering:
 
 | Pattern | Why we skip |
 | --- | --- |
