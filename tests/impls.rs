@@ -1,7 +1,7 @@
 //! `impl` block ordering & classification: anchoring (to type / to trait /
 //! orphan bucket) and the four-tier inherent → std → crate → external split.
 
-use cargo_reorder::reorder_source;
+use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 #[test]
 fn impl_follows_its_struct() {
@@ -111,16 +111,19 @@ impl Clone for Foo { fn clone(&self) -> Self { Foo } }
 #[test]
 fn non_prelude_std_trait_without_import_falls_to_external() {
     // `Display` is NOT in the prelude — without `use std::fmt::Display;`
-    // we can't tell it's std, so it falls to External.
+    // we can't tell it's std, so it falls to External (same bucket as
+    // `other::Trait`). With `short_trait_path_first` on by default the
+    // single-segment `Display` sorts before the two-segment `other::Trait`;
+    // both being External is what's being asserted, the short-first
+    // ordering is the visible consequence.
     let input = "\
 struct Foo;
 impl other::Trait for Foo {}
 impl Display for Foo {}
 ";
     let out = reorder_source(input).unwrap();
-    // Both External — preserve source order.
     assert!(
-        out.find("other::Trait").unwrap() < out.find("impl Display").unwrap(),
+        out.find("impl Display").unwrap() < out.find("other::Trait").unwrap(),
         "{out}"
     );
 }
@@ -207,4 +210,46 @@ fn helper() {}
     let p_impl = out.find("impl<T: Clone> Wrapper").unwrap();
     let p_fn = out.find("fn helper").unwrap();
     assert!(p_struct < p_impl && p_impl < p_fn, "{out}");
+}
+
+#[test]
+fn short_trait_path_sorts_before_long_path() {
+    // `impl Default for Foo` and `impl std::default::Default for Foo`
+    // classify identically (Default is a prelude trait → StdTrait, and
+    // `std::...` also classifies as StdTrait). With the default
+    // `short_trait_path_first` on, the unqualified form sorts first.
+    let input = "\
+struct Foo;
+impl std::default::Default for Foo { fn default() -> Self { Foo } }
+impl Default for Foo { fn default() -> Self { Foo } }
+";
+    let out = reorder_source(input).unwrap();
+    let p_short = out.find("impl Default for Foo").unwrap();
+    let p_long = out.find("impl std::default::Default for Foo").unwrap();
+    assert!(
+        p_short < p_long,
+        "shorter trait path must precede the qualified form:\n{out}"
+    );
+}
+
+#[test]
+fn short_trait_path_first_can_be_disabled() {
+    // With the flag off, the two impls tie on every sort key field and
+    // fall through to original_index — i.e. preserve source order.
+    let input = "\
+struct Foo;
+impl std::default::Default for Foo { fn default() -> Self { Foo } }
+impl Default for Foo { fn default() -> Self { Foo } }
+";
+    let cfg = Config {
+        short_trait_path_first: false,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    let p_long = out.find("impl std::default::Default for Foo").unwrap();
+    let p_short = out.find("impl Default for Foo").unwrap();
+    assert!(
+        p_long < p_short,
+        "with flag off, source order should be preserved:\n{out}"
+    );
 }

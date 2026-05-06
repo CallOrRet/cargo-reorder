@@ -60,6 +60,12 @@ Single-segment names that aren't path-qualified, aren't imported,
 aren't declared locally, and aren't in the prelude fall through to
 "external".
 
+Within a single classification bucket, **shorter trait paths sort
+first** (on by default; disable with `--no-short-trait-path-first`).
+So `impl Default for Foo` precedes `impl std::default::Default for Foo`
+when both target the same type. With the flag off, source order is
+preserved.
+
 Within every other category the original relative order is preserved
 (stable sort).
 
@@ -242,6 +248,7 @@ Grouped by function.
 | `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
 | `--no-reorder-inline-mods` | don't reorder bodies of inline `mod foo { ... }` blocks (see "On `--no-reorder-inline-mods`" below) |
+| `--no-short-trait-path-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
 
 ### Output mode
 

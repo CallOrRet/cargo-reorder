@@ -127,6 +127,12 @@ struct Cli {
     #[arg(long)]
     no_reorder_inline_mods: bool,
 
+    /// Disable ordering shorter trait paths first. By default,
+    /// `impl Debug for Foo` precedes `impl std::fmt::Debug for Foo`
+    /// when both target the same type and classify identically.
+    #[arg(long)]
+    no_short_trait_path_first: bool,
+
     /// Skip files whose paths contain any of these substrings.
     #[arg(long)]
     exclude: Vec<String>,
@@ -151,6 +157,7 @@ impl Cli {
             pub_mod_first: self.pub_mod_first,
             struct_before_trait: self.struct_before_trait,
             reorder_inline_mods: !self.no_reorder_inline_mods,
+            short_trait_path_first: !self.no_short_trait_path_first,
         }
     }
 }

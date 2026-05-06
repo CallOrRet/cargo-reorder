@@ -202,6 +202,7 @@ mod tests {
 | `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
 | `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
+| `--no-short-trait-path-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
 
 ### 输出模式
 

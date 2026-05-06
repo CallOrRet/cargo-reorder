@@ -235,6 +235,12 @@ pub struct Config {
     /// with the same rules. On by default — see README for the skip list
     /// (test mods, `#[macro_use]` mods, pure-`use` mods).
     pub reorder_inline_mods: bool,
+    /// When two trait `impl` blocks share the same anchor and trait
+    /// classification (e.g. `impl Debug for Foo` and
+    /// `impl std::fmt::Debug for Foo`), order the shorter trait path
+    /// first. On by default — matches the convention that the unqualified
+    /// form goes before its fully-qualified equivalent.
+    pub short_trait_path_first: bool,
 }
 
 impl Default for Config {
@@ -247,6 +253,7 @@ impl Default for Config {
             pub_mod_first: false,
             struct_before_trait: false,
             reorder_inline_mods: true,
+            short_trait_path_first: true,
         }
     }
 }
@@ -279,6 +286,11 @@ pub(crate) struct SortKey {
     follower: u8,
     /// Within a type's followers: inherent (0) → std trait (1) → external (2).
     impl_kind: u8,
+    /// Trait-path segment count for trait `impl` blocks (0 for non-impls
+    /// and inherent impls). Shorter paths sort first when
+    /// `short_trait_path_first` is on; otherwise this is always 0 and
+    /// the field is inert.
+    trait_path_len: u8,
     /// Import group (only meaningful for `use` items).
     import_group: u8,
     /// Tie-breaker: original source index (preserves stable order).
@@ -646,6 +658,7 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
                     anchor: 0,
                     follower: 0,
                     impl_kind: 0,
+                    trait_path_len: 0,
                     import_group: 0,
                     original_index: n_items + fence_idx,
                 },
@@ -709,6 +722,14 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
                     scope.local_traits,
                 ),
             };
+            let trait_path_len = if cfg.short_trait_path_first {
+                im.trait_
+                    .as_ref()
+                    .map(|(_, p, _)| p.segments.len().min(u8::MAX as usize) as u8)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             if let Some((anchor_idx, anchor_cat)) = anchor {
                 return SortKey {
@@ -717,6 +738,7 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
                     anchor: anchor_idx,
                     follower: 1,
                     impl_kind: kind as u8,
+                    trait_path_len,
                     import_group: 0,
                     original_index: it.idx,
                 };
@@ -729,6 +751,7 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
                 anchor: it.idx,
                 follower: 0,
                 impl_kind: kind as u8,
+                trait_path_len,
                 import_group: 0,
                 original_index: it.idx,
             };
@@ -765,6 +788,7 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
         anchor,
         follower: 0,
         impl_kind: 0,
+        trait_path_len: 0,
         import_group: subgroup,
         original_index: it.idx,
     }
