@@ -619,7 +619,8 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
         };
         let body = take_lines(&lines, start, end);
         let body = if !cfg.no_reorder_fields {
-            crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+            let body = crate::fields::reorder_in_item(item, &body, start).unwrap_or(body);
+            crate::fields::reorder_fn_members_in_item(item, &body, start).unwrap_or(body)
         } else {
             body
         };

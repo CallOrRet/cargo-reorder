@@ -30,7 +30,10 @@
 //!   names to group on.
 
 use syn::spanned::Spanned;
-use syn::{Attribute, Fields, FieldsNamed, Item, ItemEnum, ItemStruct, ItemUnion};
+use syn::{
+    Attribute, Fields, FieldsNamed, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, ItemTrait,
+    ItemUnion, TraitItem,
+};
 
 /// Top-level entry point: given a parsed item and its raw source text,
 /// return a rewritten version with fields/variants reordered, or
@@ -42,6 +45,56 @@ pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -
         Item::Enum(e) => rewrite_enum(e, body_text, start_line),
         _ => None,
     }
+}
+
+/// Reorder `fn`/`async fn` members inside `impl` / `trait` bodies.
+///
+/// Rules mirror README category ordering (`fn` before `async fn`) and
+/// the same prefix-group + shortest-first strategy used by field/top-level
+/// grouping. Non-function members (const/type/macro/...) are hard barriers;
+/// only contiguous runs of function members are reordered.
+pub(crate) fn reorder_fn_members_in_item(
+    item: &Item,
+    body_text: &str,
+    start_line: usize,
+) -> Option<String> {
+    match item {
+        Item::Impl(im) => rewrite_impl_fn_members(im, body_text, start_line),
+        Item::Trait(tr) => rewrite_trait_fn_members(tr, body_text, start_line),
+        _ => None,
+    }
+}
+
+fn rewrite_impl_fn_members(im: &ItemImpl, body_text: &str, start_line: usize) -> Option<String> {
+    rewrite_runs(
+        body_text,
+        start_line,
+        im.items.iter().map(|it| match it {
+            ImplItem::Fn(f) => Some(SortableMember {
+                first_line: f.span().start().line,
+                last_line: f.span().end().line,
+                name: f.sig.ident.to_string(),
+                is_async: f.sig.asyncness.is_some(),
+            }),
+            _ => None,
+        }),
+    )
+}
+
+fn rewrite_trait_fn_members(tr: &ItemTrait, body_text: &str, start_line: usize) -> Option<String> {
+    rewrite_runs(
+        body_text,
+        start_line,
+        tr.items.iter().map(|it| match it {
+            TraitItem::Fn(f) => Some(SortableMember {
+                first_line: f.span().start().line,
+                last_line: f.span().end().line,
+                name: f.sig.ident.to_string(),
+                is_async: f.sig.asyncness.is_some(),
+            }),
+            _ => None,
+        }),
+    )
 }
 
 fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<String> {
@@ -292,6 +345,76 @@ struct SortableLines {
     first_line: usize,
     last_line: usize,
     name: String,
+}
+
+#[derive(Clone)]
+struct SortableMember {
+    first_line: usize,
+    last_line: usize,
+    name: String,
+    is_async: bool,
+}
+
+fn rewrite_runs<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
+where
+    I: IntoIterator<Item = Option<SortableMember>>,
+{
+    let mut out = text.to_string();
+    let members: Vec<SortableMember> = entries.into_iter().flatten().collect();
+    if members.len() < 2 {
+        return None;
+    }
+    // Split into contiguous line runs.
+    let mut runs: Vec<Vec<SortableMember>> = Vec::new();
+    for m in members {
+        if let Some(last) = runs.last_mut().and_then(|r| r.last().cloned()) {
+            if m.first_line <= last.last_line + 1 {
+                runs.last_mut().unwrap().push(m);
+                continue;
+            }
+        }
+        runs.push(vec![m]);
+    }
+    let mut rewrites: Vec<(usize, usize, String)> = Vec::new();
+    for run in runs {
+        if run.len() < 2 {
+            continue;
+        }
+        let reordered = sort_member_run(&out, text_start_line, &run)?;
+        let lo = run.first()?.first_line;
+        let hi = run.last()?.last_line;
+        let (lo_byte, hi_byte) = byte_range_for_line_range(&out, text_start_line, lo, hi);
+        rewrites.push((lo_byte, hi_byte, reordered));
+    }
+    rewrites.sort_by_key(|(lo, _, _)| std::cmp::Reverse(*lo));
+    for (lo, hi, rep) in rewrites {
+        out.replace_range(lo..hi, &rep);
+    }
+    Some(out)
+}
+
+fn sort_member_run(text: &str, text_start_line: usize, run: &[SortableMember]) -> Option<String> {
+    let lines = split_lines(text);
+    let to_idx = |line: usize| -> Option<usize> { line.checked_sub(text_start_line) };
+    let keys = compute_group_keys(run.iter().enumerate().map(|(i, m)| (i, m.name.as_str())));
+    let mut idxs: Vec<usize> = (0..run.len()).collect();
+    idxs.sort_by_key(|&i| {
+        let cat = if run[i].is_async { 1u8 } else { 0u8 };
+        let (g, l) = keys
+            .get(&i)
+            .copied()
+            .unwrap_or((0, run[i].name.len() as u32));
+        (cat, g, l, i)
+    });
+    let mut s = String::new();
+    for i in idxs {
+        let lo = to_idx(run[i].first_line)?;
+        let hi = to_idx(run[i].last_line)?;
+        for line in &lines[lo..=hi] {
+            s.push_str(line);
+        }
+    }
+    Some(s)
 }
 
 /// First "word" of an identifier — text up to the first `_` (snake_case)
