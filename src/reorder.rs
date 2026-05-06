@@ -297,17 +297,6 @@ pub(crate) struct SortKey {
     pub(crate) original_index: usize,
 }
 
-/// Per-item inputs to [`compute_sort_key`]. Bundling these keeps the
-/// function signature small and the call site readable.
-struct SortItem<'a> {
-    item: &'a Item,
-    idx: usize,
-    segment: u32,
-    category: Category,
-    import_group: Option<ImportGroup>,
-    mod_is_pub: Option<bool>,
-}
-
 /// Per-scope reference data shared across every call to
 /// [`compute_sort_key`]: name → (idx, category) lookup for impl
 /// anchoring, plus the three trait-classification name sets.
@@ -594,17 +583,18 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
             }
             _ => None,
         };
-        let sort_input = SortItem {
+        // segments[idx] is already widened by FENCE_STRIDE and bumped
+        // past any preceding fences.
+        let sort_key = compute_sort_key(
             item,
             idx,
-            // segments[idx] is already widened by FENCE_STRIDE and
-            // bumped past any preceding fences.
-            segment: segments[idx],
+            segments[idx],
             category,
             import_group,
             mod_is_pub,
-        };
-        let sort_key = compute_sort_key(&sort_input, cfg, &scope);
+            cfg,
+            &scope,
+        );
         blocks.push(Block {
             category,
             mod_is_pub,
@@ -679,10 +669,20 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     ))
 }
 
-fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> SortKey {
+#[allow(clippy::too_many_arguments)]
+fn compute_sort_key(
+    item: &Item,
+    idx: usize,
+    segment: u32,
+    category: Category,
+    import_group: Option<ImportGroup>,
+    mod_is_pub: Option<bool>,
+    cfg: &Config,
+    scope: &ScopeIndex<'_>,
+) -> SortKey {
     // Order within a single category. The third visual group internally
     // sorts as crate (2) -> super (3) -> self (4) -> local-mod (5).
-    let import_group_byte = match it.import_group {
+    let import_group_byte = match import_group {
         Some(ImportGroup::Std) => 0,
         Some(ImportGroup::External) => 1,
         Some(ImportGroup::Crate) => 2,
@@ -693,14 +693,14 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
     };
 
     // `#[cfg(test)] mod tests` always last (unless disabled).
-    let primary = if !cfg.tests_last && it.category == Category::TestMod {
+    let primary = if !cfg.tests_last && category == Category::TestMod {
         Category::Mod.weight(cfg)
     } else {
-        it.category.weight(cfg)
+        category.weight(cfg)
     };
 
     if cfg.group_impls_with_type {
-        if let Item::Impl(im) = it.item {
+        if let Item::Impl(im) = item {
             // Try to anchor on the Self type (e.g. `impl X for Foo` -> Foo).
             let anchor = type_last_segment(&im.self_ty)
                 .and_then(|n| scope.name_index.get(&n).copied())
@@ -733,27 +733,27 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
 
             if let Some((anchor_idx, anchor_cat)) = anchor {
                 return SortKey {
-                    segment: it.segment,
+                    segment,
                     primary: anchor_cat.weight(cfg),
                     anchor: anchor_idx,
                     follower: 1,
                     impl_kind: kind as u8,
                     trait_path_len,
                     import_group: 0,
-                    original_index: it.idx,
+                    original_index: idx,
                 };
             }
             // Orphan impl: still classify by trait kind so all-std comes before
             // all-external when several orphan impls share the Impl bucket.
             return SortKey {
-                segment: it.segment,
+                segment,
                 primary,
-                anchor: it.idx,
+                anchor: idx,
                 follower: 0,
                 impl_kind: kind as u8,
                 trait_path_len,
                 import_group: 0,
-                original_index: it.idx,
+                original_index: idx,
             };
         }
     }
@@ -763,18 +763,18 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
     // category they fall through to `subgroup` / `original_index` for
     // ordering — otherwise a `use` with smaller original_index would sort
     // ahead of one in an earlier import group.
-    let anchor = match it.category {
-        Category::Struct | Category::Enum | Category::Trait => it.idx,
+    let anchor = match category {
+        Category::Struct | Category::Enum | Category::Trait => idx,
         _ => 0,
     };
 
     // `import_group` field on SortKey is reused as a generic "secondary sort
     // bucket within a category". For Use it is the std/ext/crate-local index;
     // for Mod with `pub_mod_first` it is 0=pub, 1=private; otherwise 0.
-    let subgroup = if cfg.group_imports && it.import_group.is_some() {
+    let subgroup = if cfg.group_imports && import_group.is_some() {
         import_group_byte
-    } else if cfg.pub_mod_first && it.category == Category::Mod {
-        match it.mod_is_pub {
+    } else if cfg.pub_mod_first && category == Category::Mod {
+        match mod_is_pub {
             Some(true) => 0,
             Some(false) | None => 1,
         }
@@ -783,14 +783,14 @@ fn compute_sort_key(it: &SortItem<'_>, cfg: &Config, scope: &ScopeIndex<'_>) -> 
     };
 
     SortKey {
-        segment: it.segment,
+        segment,
         primary,
         anchor,
         follower: 0,
         impl_kind: 0,
         trait_path_len: 0,
         import_group: subgroup,
-        original_index: it.idx,
+        original_index: idx,
     }
 }
 
