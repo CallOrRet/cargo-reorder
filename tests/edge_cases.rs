@@ -121,4 +121,3 @@ fn many_blank_lines_preserved_and_idempotent() {
         "{out}"
     );
 }
-

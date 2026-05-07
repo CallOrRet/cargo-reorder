@@ -218,4 +218,3 @@ fn local_mod_falls_back_to_external_when_no_local_decl() {
         "should be classified as external when no local mod:\n{out}"
     );
 }
-

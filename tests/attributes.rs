@@ -163,4 +163,3 @@ fn derive_attribute_travels_with_struct() {
     );
     assert!(p_struct < p_fn, "{out}");
 }
-

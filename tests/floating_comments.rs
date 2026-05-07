@@ -289,4 +289,3 @@ fn y() {}
         "comment must stay glued to its item:\n{out}"
     );
 }
-

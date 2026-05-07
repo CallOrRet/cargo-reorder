@@ -169,4 +169,3 @@ edition = \"2024\"
         "bogus rustfmt flag should propagate through cargo fmt and fail"
     );
 }
-

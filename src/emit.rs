@@ -87,4 +87,3 @@ fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
     }
     false
 }
-

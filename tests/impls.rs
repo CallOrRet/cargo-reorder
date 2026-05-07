@@ -252,4 +252,3 @@ impl Foo { fn me(&self) {} }
     assert!(p_std < p_crate, "std < crate-local:\n{out}");
     assert!(p_crate < p_ext, "crate-local < external:\n{out}");
 }
-

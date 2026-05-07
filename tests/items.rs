@@ -279,4 +279,3 @@ fn always() {}
         "both fns must be in the Fn bucket, not promoted to TestMod (999):\n{out}"
     );
 }
-

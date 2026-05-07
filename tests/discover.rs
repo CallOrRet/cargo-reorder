@@ -263,4 +263,3 @@ fn virtual_workspace_default_includes_all_members() {
         assert!(found.contains(&want), "missing {rel} in {found:#?}");
     }
 }
-

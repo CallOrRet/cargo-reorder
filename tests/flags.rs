@@ -199,4 +199,3 @@ fn x() {}
         "default mode must preserve mod blank lines verbatim:\n{out}"
     );
 }
-

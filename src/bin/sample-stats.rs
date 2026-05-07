@@ -76,7 +76,7 @@ impl std::ops::AddAssign for Counts {
 /// value doesn't matter, only relative ordering does.
 #[derive(Default)]
 struct FileObs {
-    mods: Vec<usize>,      // private + pub external mods
+    mods: Vec<usize>, // private + pub external mods
 
     uses: Vec<usize>,
 
@@ -84,7 +84,7 @@ struct FileObs {
 
     traits: Vec<usize>,
 
-    pub_mods: Vec<usize>,  // external `pub mod` only
+    pub_mods: Vec<usize>, // external `pub mod` only
 
     priv_mods: Vec<usize>, // external private `mod` only
 }

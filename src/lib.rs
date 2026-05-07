@@ -39,4 +39,3 @@ mod text;
 pub use reorder::{
     Config, ReorderError, reorder_source, reorder_source_with, reorder_source_with_path,
 };
-

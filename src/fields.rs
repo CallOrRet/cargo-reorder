@@ -241,7 +241,10 @@ where
         }
         (sum_a * count_b).cmp(&(sum_b * count_a))
     });
-    let groups: Vec<Vec<usize>> = order.into_iter().map(|i| std::mem::take(&mut groups[i])).collect();
+    let groups: Vec<Vec<usize>> = order
+        .into_iter()
+        .map(|i| std::mem::take(&mut groups[i]))
+        .collect();
 
     // Emit: each entry's slice (which already ends with \n), with a
     // blank line between groups.
@@ -487,55 +490,87 @@ fn rewrite_named_fields_inplace(
                 first_line,
                 last_line,
                 name,
-                bucket: if pin_last && i == last_idx { PIN_LAST } else { 0 },
+                bucket: if pin_last && i == last_idx {
+                    PIN_LAST
+                } else {
+                    0
+                },
             }
         }),
     )
 }
 
-/// Compute a per-item sort key `(group_mean_x_count, name_len)` for
-/// each `(idx, name)` pair, where:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupSortKey {
+    mean_sum: u64,
+
+    mean_count: u32,
+
+    group_order: usize,
+
+    name_len: u32,
+}
+
+impl GroupSortKey {
+    pub(crate) fn source_order(idx: usize) -> Self {
+        Self {
+            mean_sum: 0,
+            mean_count: 1,
+            group_order: idx,
+            name_len: 0,
+        }
+    }
+}
+
+impl Ord for GroupSortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.mean_sum as u128 * other.mean_count as u128)
+            .cmp(&(other.mean_sum as u128 * self.mean_count as u128))
+            .then_with(|| self.group_order.cmp(&other.group_order))
+            .then_with(|| self.name_len.cmp(&other.name_len))
+    }
+}
+
+impl PartialOrd for GroupSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Compute a per-item group sort key for each `(idx, name)` pair, where:
 /// - All items sharing the same `prefix_of(name)` form one group.
-/// - The group's first key component is its mean name length expressed
-///   as `sum_of_lens` (so the *order* of groups by mean matches integer
-///   ordering of `sum_of_lens / count`, which we cross-multiply to keep
-///   integers exact at compare time).
-///
-/// To allow direct use of the returned `(u32, u32)` as a `SortKey`
-/// component while still ordering by mean, we encode the mean as a
-/// fixed-point integer: `sum * 1_000_000 / count` (clamped to u32
-/// range). Comparing these integers gives the same order as comparing
-/// the true means.
-///
-/// `name_len` is the second component, used as the in-group secondary
-/// key: shorter names sort first within a group.
-///
-/// Items whose name is empty produce a `(u32::MAX, 0)` key so they
-/// sort to the end of their bucket — but in practice all callers pass
-/// non-empty names.
-pub(crate) fn compute_group_keys<'a, I>(items: I) -> std::collections::HashMap<usize, (u32, u32)>
+/// - Groups sort by exact mean name length using cross multiplication.
+/// - Ties between groups preserve the first source appearance of the
+///   group, so a same-mean group stays contiguous.
+/// - Within a group, shorter names sort first; ties preserve source order.
+pub(crate) fn compute_group_keys<'a, I>(items: I) -> std::collections::HashMap<usize, GroupSortKey>
 where
     I: IntoIterator<Item = (usize, &'a str)>,
 {
     let items: Vec<(usize, &'a str)> = items.into_iter().collect();
-    let mut groups: std::collections::HashMap<&'a str, (u64, u32)> =
+    let mut groups: std::collections::HashMap<&'a str, (u64, u32, usize)> =
         std::collections::HashMap::new();
     for (_, name) in &items {
-        let entry = groups.entry(prefix_of(name)).or_insert((0u64, 0u32));
+        let next_order = groups.len();
+        let entry = groups
+            .entry(prefix_of(name))
+            .or_insert((0u64, 0u32, next_order));
         entry.0 += name.len() as u64;
         entry.1 += 1;
     }
     let mut out = std::collections::HashMap::with_capacity(items.len());
     for (idx, name) in items {
         let pfx = prefix_of(name);
-        let (sum, count) = groups[pfx];
-        // Encode mean as sum * 1_000_000 / count for fixed-point ordering.
-        let mean_proxy = if count == 0 {
-            0
-        } else {
-            ((sum as u128 * 1_000_000) / count as u128).min(u32::MAX as u128) as u32
-        };
-        out.insert(idx, (mean_proxy, name.len() as u32));
+        let (sum, count, group_order) = groups[pfx];
+        out.insert(
+            idx,
+            GroupSortKey {
+                mean_sum: sum,
+                mean_count: count,
+                group_order,
+                name_len: name.len() as u32,
+            },
+        );
     }
     out
 }
@@ -561,15 +596,12 @@ fn has_unsized_generic(generics: &syn::Generics) -> bool {
     if direct {
         return true;
     }
-    generics
-        .where_clause
-        .as_ref()
-        .is_some_and(|w| {
-            w.predicates.iter().any(|p| match p {
-                WherePredicate::Type(pt) => bounds_have_maybe_sized(&pt.bounds),
-                _ => false,
-            })
+    generics.where_clause.as_ref().is_some_and(|w| {
+        w.predicates.iter().any(|p| match p {
+            WherePredicate::Type(pt) => bounds_have_maybe_sized(&pt.bounds),
+            _ => false,
         })
+    })
 }
 
 /// True if the variant carries a serde-derive attribute that requires it
@@ -657,4 +689,3 @@ fn byte_range_for_line_range(
     }
     (byte, end_byte)
 }
-

@@ -60,4 +60,3 @@ fn filter_mode_reorders_stdin_to_stdout() {
     let p_user = stdout.find("fn user_login").expect("user_login in stdout");
     assert!(p_cache < p_user, "filter mode should reorder:\n{stdout}");
 }
-

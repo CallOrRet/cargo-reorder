@@ -413,4 +413,3 @@ fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
         "macro barrier must keep macro_rules! before `mod bar;` in source order:\n{out}"
     );
 }
-

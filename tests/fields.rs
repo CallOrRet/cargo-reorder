@@ -507,4 +507,3 @@ enum E {
     let p_foo_a = out.find("foo_a").unwrap();
     assert!(p_bar < p_foo_z && p_foo_z < p_foo_a, "{out}");
 }
-

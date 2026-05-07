@@ -337,4 +337,3 @@ trait Repo {
     let p_idx = out.find("fn save_index").unwrap();
     assert!(p_save < p_del && p_del < p_idx, "{out}");
 }
-

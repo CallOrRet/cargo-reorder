@@ -232,4 +232,3 @@ fn cargo_target_entries(opts: DiscoverOptions<'_>) -> Result<Vec<PathBuf>> {
     }
     Ok(entries)
 }
-

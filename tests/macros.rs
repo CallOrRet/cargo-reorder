@@ -193,4 +193,3 @@ fn user() { debug!(); }
         "user must stay below both barriers:\n{out}"
     );
 }
-

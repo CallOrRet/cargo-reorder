@@ -134,4 +134,3 @@ pub mod paths;
         "macro_rules! t! must precede `mod paths;` because paths.rs invokes t!() bare:\n{out}"
     );
 }
-

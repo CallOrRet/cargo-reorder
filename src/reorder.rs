@@ -8,6 +8,7 @@ use std::fmt;
 
 use syn::{File, Item};
 
+use crate::fields::GroupSortKey;
 use crate::imports::ImportGroup;
 use crate::text::{extract_floating_comment, split_at_last_blank, split_keep_endings, take_lines};
 
@@ -255,14 +256,14 @@ pub struct Config {
     /// sample (12/21 mod-first vs 7/21 use-first); see README.
     pub no_mod_before_use: bool,
     /// Disable reordering named fields inside `struct` / `union` /
-    /// `enum` (and inside enum variants). When on, fields are grouped
-    /// by their snake_case / PascalCase / camelCase first word, within
-    /// each group sorted shortest-name-first, and the groups are
-    /// emitted in ascending order of the group's mean name length
-    /// with a blank line between them. ABI- and semantics-affecting
-    /// shapes are always skipped: any `#[repr(...)]`, any
-    /// `#[derive(PartialOrd | Ord)]`, enums whose any variant carries
-    /// an explicit discriminant, and tuple/unit variants.
+    /// `enum` (and inside enum variants). When off, fields are grouped by
+    /// their snake_case / PascalCase / camelCase first word, within each
+    /// group sorted shortest-name-first, and the groups are emitted in
+    /// ascending order of the group's mean name length with a blank line
+    /// between them. ABI- and semantics-affecting shapes are always
+    /// skipped: any `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`,
+    /// enums whose any variant carries an explicit discriminant, and
+    /// tuple/unit variants.
     pub no_reorder_fields: bool,
     /// Disable the prefix-group + length sort applied **inside `impl`
     /// and `trait` bodies** (the const → type → fn → async fn category
@@ -296,14 +297,14 @@ pub(crate) struct SortKey {
     segment: u32,
     /// Primary category weight.
     primary: u32,
-    /// Same-category grouping key: `(group_mean_proxy, name_len, idx)`.
+    /// Same-category grouping key: exact group mean, group source order,
+    /// name length, and source index.
     /// Items in a category-eligible-for-grouping
-    /// (struct/union/enum/trait/fn/async-fn) get a key derived from
-    /// their name's prefix-group; impls inherit their target type's
+    /// (struct/union/enum/trait/fn/async-fn) get a key derived from their
+    /// name's prefix-group; impls inherit their target type's
     /// key (so impls follow the type to its new sorted position).
-    /// Items not subject to grouping get `(0, 0, idx)`, which collapses
-    /// to a stable source-order sort within their category.
-    anchor: (u32, u32, usize),
+    /// Items not subject to grouping get a source-order key.
+    anchor: (GroupSortKey, usize),
     /// 0 = the type definition itself, 1 = a follower impl.
     follower: u8,
     /// Within a type's followers: inherent (0) → std trait (1) →
@@ -330,11 +331,11 @@ pub(crate) struct SortKey {
 struct ScopeIndex<'a> {
     name_index: &'a HashMap<String, (usize, Category)>,
 
-    /// Per-item `(group_mean_proxy, name_len)` for items in
+    /// Per-item group key for items in
     /// group-eligible top-level categories
     /// (struct/union/enum/trait/fn/async-fn). Items not in the map
-    /// fall back to `(0, 0)` and sort by source order.
-    group_keys: &'a HashMap<usize, (u32, u32)>,
+    /// fall back to source order.
+    group_keys: &'a HashMap<usize, GroupSortKey>,
 
     std_imports: &'a HashSet<String>,
 
@@ -437,9 +438,8 @@ fn reorder_inner(
     let mut local_traits: HashSet<String> = HashSet::new();
     // Per-category names for top-level group-sorting. We collect
     // `(idx, name)` pairs bucketed by `Category`, then run
-    // `crate::fields::compute_group_keys` per bucket so each item gets
-    // a `(group_mean_proxy, name_len)` key derived only from
-    // same-category siblings.
+    // `crate::fields::compute_group_keys` per bucket so each item gets a
+    // group key derived only from same-category siblings.
     let mut category_names: HashMap<Category, Vec<(usize, String)>> = HashMap::new();
     for (idx, item) in parsed.items.iter().enumerate() {
         let cat = Category::classify(item);
@@ -481,8 +481,8 @@ fn reorder_inner(
         }
     }
     // Build per-item group keys. Only categories the user wants
-    // grouped get a non-zero key; other items fall back to `(0, 0)`.
-    let mut group_keys: HashMap<usize, (u32, u32)> = HashMap::new();
+    // grouped get a key; other items fall back to source order.
+    let mut group_keys: HashMap<usize, GroupSortKey> = HashMap::new();
     if !cfg.no_reorder_fields {
         for (cat, names) in &category_names {
             if !is_top_level_groupable(*cat) {
@@ -636,7 +636,7 @@ fn reorder_inner(
                 sort_key: SortKey {
                     segment: fence_segment,
                     primary: 0,
-                    anchor: (0, 0, 0),
+                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
                     follower: 0,
                     impl_kind: 0,
                     trait_path_len: 0,
@@ -880,12 +880,15 @@ fn compute_sort_key(
             if let Some((anchor_idx, anchor_cat)) = anchor {
                 // Inherit the target type's group key so impls follow
                 // their type to its new sorted position.
-                let (gk_mean, gk_len) =
-                    scope.group_keys.get(&anchor_idx).copied().unwrap_or((0, 0));
+                let group_key = scope
+                    .group_keys
+                    .get(&anchor_idx)
+                    .copied()
+                    .unwrap_or_else(|| GroupSortKey::source_order(anchor_idx));
                 return SortKey {
                     segment,
                     primary: anchor_cat.weight(cfg),
-                    anchor: (gk_mean, gk_len, anchor_idx),
+                    anchor: (group_key, anchor_idx),
                     follower: 1,
                     impl_kind: kind as u8,
                     trait_path_len,
@@ -898,7 +901,7 @@ fn compute_sort_key(
             return SortKey {
                 segment,
                 primary,
-                anchor: (0, 0, 0),
+                anchor: (GroupSortKey::source_order(0), 0),
                 follower: 0,
                 impl_kind: kind as u8,
                 trait_path_len,
@@ -910,17 +913,21 @@ fn compute_sort_key(
 
     // For top-level group-eligible categories
     // (struct/union/enum/trait/fn/async-fn), use the precomputed
-    // `(group_mean_proxy, name_len, idx)` triple so same-category
+    // group key so same-category
     // siblings sort by prefix-group + length + source order. Other
-    // items get `(0, 0, 0)` so they all tie on anchor and fall
+    // items get a neutral source-order key so they all tie on anchor and fall
     // through to `subgroup` / `original_index` — preserving e.g. the
     // pub-mod-first secondary-sort path for `mod` items under
     // `--no-preserve-mod-order`.
     let anchor = if is_top_level_groupable(category) {
-        let (mean, len) = scope.group_keys.get(&idx).copied().unwrap_or((0, 0));
-        (mean, len, idx)
+        let key = scope
+            .group_keys
+            .get(&idx)
+            .copied()
+            .unwrap_or_else(|| GroupSortKey::source_order(idx));
+        (key, idx)
     } else {
-        (0, 0, 0)
+        (GroupSortKey::source_order(0), 0)
     };
 
     // `import_group` field on SortKey is reused as a generic "secondary sort
@@ -994,4 +1001,3 @@ fn should_skip_inline_recursion(m: &syn::ItemMod, items: &[Item]) -> bool {
     }
     false
 }
-

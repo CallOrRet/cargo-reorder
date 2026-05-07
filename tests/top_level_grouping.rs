@@ -141,6 +141,24 @@ fn cache_set() {}
 }
 
 #[test]
+fn same_mean_groups_stay_contiguous() {
+    let input = "\
+fn foo_abcde() {}
+fn bar_xyz() {}
+fn foo_a() {}
+";
+    let out = reorder_source(input).unwrap();
+    // Group `foo`: foo_a (5), foo_abcde (9) -> mean 7
+    // Group `bar`: bar_xyz (7) -> mean 7
+    // Equal group means preserve group source order, so the foo group
+    // remains contiguous instead of letting bar_xyz split it.
+    let p_foo_a = out.find("fn foo_a").unwrap();
+    let p_foo_abcde = out.find("fn foo_abcde").unwrap();
+    let p_bar = out.find("fn bar_xyz").unwrap();
+    assert!(p_foo_a < p_foo_abcde && p_foo_abcde < p_bar, "{out}");
+}
+
+#[test]
 fn top_level_structs_regroup_by_prefix() {
     let input = "\
 struct cache_dir;
@@ -226,4 +244,3 @@ trait RenderQueue {}
     // Within Render: RenderEngine (12) > RenderQueue (11) → queue first.
     assert!(p_rqueue < p_rengine, "{out}");
 }
-
