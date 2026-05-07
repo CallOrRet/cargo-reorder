@@ -1,14 +1,14 @@
 //! Top-level same-category grouping: structs/unions/enums/traits/fns/
 //! async-fns within their own category bucket are reordered using the
 //! same prefix-grouping + length-sort rules as field-level. Default
-//! ON; opt out with `Config { no_reorder_fields: true, ..default }`
+//! ON; opt out with `Config { no_fields: true, ..default }`
 //! (the same flag covers both field-level and top-level grouping).
 
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 fn opt_out() -> Config {
     Config {
-        no_reorder_fields: true,
+        no_fields: true,
         ..Config::default()
     }
 }

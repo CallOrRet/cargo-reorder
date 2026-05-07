@@ -131,7 +131,7 @@ impl Greet for String { fn greet(&self) {} }
 }
 
 #[test]
-fn short_trait_path_first_can_be_disabled() {
+fn short_trait_first_can_be_disabled() {
     // With the flag off, the two impls tie on every sort key field and
     // fall through to original_index — i.e. preserve source order.
     let input = "\
@@ -140,7 +140,7 @@ impl std::default::Default for Foo { fn default() -> Self { Foo } }
 impl Default for Foo { fn default() -> Self { Foo } }
 ";
     let cfg = Config {
-        no_short_trait_path_first: true,
+        no_short_trait_first: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -156,7 +156,7 @@ fn short_trait_path_sorts_before_long_path() {
     // `impl Default for Foo` and `impl std::default::Default for Foo`
     // classify identically (Default is a prelude trait → StdTrait, and
     // `std::...` also classifies as StdTrait). With the default
-    // `short_trait_path_first` on, the unqualified form sorts first.
+    // `short_trait_first` on, the unqualified form sorts first.
     let input = "\
 struct Foo;
 impl std::default::Default for Foo { fn default() -> Self { Foo } }
@@ -211,7 +211,7 @@ impl MyLocal for Foo {}
 fn non_prelude_std_trait_without_import_falls_to_external() {
     // `Display` is NOT in the prelude — without `use std::fmt::Display;`
     // we can't tell it's std, so it falls to External (same bucket as
-    // `other::Trait`). With `short_trait_path_first` on by default the
+    // `other::Trait`). With `short_trait_first` on by default the
     // single-segment `Display` sorts before the two-segment `other::Trait`;
     // both being External is what's being asserted, the short-first
     // ordering is the visible consequence.

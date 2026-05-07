@@ -192,8 +192,8 @@ fn cargo_target_entries(opts: DiscoverOptions<'_>) -> Result<Vec<PathBuf>> {
             .to_owned();
 
         // Selection logic, mirroring `cargo fmt`:
-        //   * `--package NAME` (one or more): keep packages whose name matches
         //   * `--all`: every workspace member
+        //   * `--package NAME` (one or more): keep packages whose name matches
         //   * neither: only the root package (or all of a virtual workspace)
         let selected = if !opts.packages.is_empty() {
             opts.packages.iter().any(|n| n == &pkg_name)

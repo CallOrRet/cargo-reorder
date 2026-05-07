@@ -189,32 +189,34 @@ mod tests {
 
 | 参数 | 作用 |
 | --- | --- |
-| `--all` | 处理 workspace 里所有成员（对齐 `cargo fmt --all`） |
 | `-p`, `--package <NAME>` | 只处理指定的 package（对齐 `cargo fmt -p NAME`），可重复 |
+| `--all` | 处理 workspace 里所有成员（对齐 `cargo fmt --all`） |
 | `--manifest-path <PATH>` | 指定 `Cargo.toml` 的路径用于发现文件（对齐 `cargo fmt --manifest-path`） |
 
 ### Item 排序策略
 
 | 参数 | 作用 |
 | --- | --- |
+| `--fn-args` | 重排函数参数；默认关闭，因为参数顺序属于调用契约 |
+| `--no-fields` | 不对 `struct` / `union` / `enum` 内部的具名字段做"前缀分组+长度排序"（默认开启，见「关于 `--no-fields`」） |
+| `--no-impl-fns` | 保留 `impl` / `trait` 块内成员（`const` / `type` / `fn` / `async fn`）的源序，字段级和顶层级排序仍然生效 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
+| `--no-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-inline-mods`」） |
 | `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-import-groups` | 不分 std / external / crate 三组 |
 | `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
-| `--no-reorder-fields` | 不对 `struct` / `union` / `enum` 内部的具名字段做"前缀分组+长度排序"（默认开启，见「关于 `--no-reorder-fields`」） |
-| `--no-reorder-impl-fns` | 保留 `impl` / `trait` 块内成员（`const` / `type` / `fn` / `async fn`）的源序，字段级和顶层级排序仍然生效 |
+| `--no-short-trait-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
 | `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
-| `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
+| `--no-single-line-fields` | 保留单行 `struct` / `union` / `enum` 字段、struct 初始化字段的源序（默认会原地重排） |
 | `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
-| `--no-short-trait-path-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
 
 ### 输出模式
 
 | 参数 | 作用 |
 | --- | --- |
-| `--fmt` | reorder 之前先跑一遍 `cargo fmt`（沿用同样的 `--all` / `-p` / `--manifest-path`）。`--check` 模式下自动跳过，避免 CI gate 写盘。 |
-| `--check` | CI 模式：有变化就退出码 1 |
 | `-v`, `--verbose` | 打印每个被改写的文件名（默认是静默） |
+| `--fmt` | reorder 之前先跑一遍 `cargo fmt`（沿用同样的 `-p` / `--all` / `--manifest-path`）。`--check` 模式下自动跳过，避免 CI gate 写盘。 |
+| `--check` | CI 模式：有变化就退出码 1 |
 | `--color <auto\|always\|never>` | 给 `--check` 的 diff 上色（`-` 红、`+` 绿、头部青）和 parse error 上色。默认 `auto`：stderr 是 tty 且没有 `NO_COLOR` 环境变量时才上色。 |
 
 > 下面的数据是用 `sample-stats`（本仓库 `src/bin/sample-stats.rs` 里的 `syn` 解析二进制）跑 fresh clone 的项目得到。换 `syn` 替代 `grep` 之后，所有可见性变体（`pub` / `pub(crate)` / `pub(super)` / `pub(in path)`）和 inline `mod foo { ... }` 嵌套都被正确识别。每个 scope（文件主体 OR 一个非 test 的 inline `mod` 主体）算一次观察；**test mod**（名为 `tests` / `test`，或带 `#[cfg(test)]` 的）整体跳过 —— 不算自己的观察，也不递归进去。
@@ -332,15 +334,16 @@ cargo build --release --bin sample-stats
 
 按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--no-trait-before-struct`。
 
-## 关于 `--no-reorder-fields`
+## 关于 `--no-fields`
 
-默认情况下 cargo-reorder 在**三个层面**用同一套分组规则：
+默认情况下 cargo-reorder 在**四个层面**用同一套分组规则：
 
 - **字段级**：每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段
 - **顶层（同类内部）**：连续的顶层 `struct` / `union` / `enum` / `trait` / `fn` / `async fn` 之间，同类 item 按同样的"前缀分组 + 长度"规则重排。`impl` 块跟随它锚定的类型一起移动，所以 `struct Foo` + `impl Foo` 始终连在一起
 - **`impl` / `trait` 块内部**：成员按与顶层一致的分类顺序排——`const` → `type` → `fn` → `async fn`，每一类内部再用前缀分组 + 长度规则。宏 / verbatim 成员是硬屏障，整个 body 保持源序
+- **struct 初始化表达式**：`S { ... }`、`U { ... }`、`E::V { ... }` 内的具名字段也按同一规则重排。functional update 的 `..base` 保持在末尾
 
-三个层面共用的规则：
+四个层面共用的规则：
 
 1. **按"首词"分组**：
    - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
@@ -363,7 +366,11 @@ struct Foo {                  struct Foo {
                               }
 ```
 
-加 `--no-reorder-fields` 同时关掉三层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部保持原样，每个 `impl` / `trait` body 也保持原样。如果只想保留 `impl` / `trait` body 的源序、其他两层照常排（比如方法是 builder 链、有特定调用顺序），用更精准的 `--no-reorder-impl-fns`。
+加 `--no-fields` 同时关掉四层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部保持原样，每个 `impl` / `trait` body 和 struct 初始化表达式也保持原样。如果只想保留 `impl` / `trait` body 的源序、其他层照常排（比如方法是 builder 链、有特定调用顺序），用更精准的 `--no-impl-fns`。
+
+单行字段列表默认也会用 byte/span 级 pass 处理，例如 `struct S { b: u8, a: u8 }`、`S { b: 1, a: 2 }`；输出仍保持单行，不插入空行分隔。加 `--no-single-line-fields` 可以只关闭这部分单行字段重排，同时保留多行字段重排。
+
+函数参数默认不重排。加 `--fn-args` 后，单行和多行参数列表都会使用同一套分组规则；第一个 receiver 参数（`self`、`mut self`、`&self`、`&mut self`）固定在最前面，其余普通 ident 参数会参与重排。多行签名会保留已有空行，但不会新增组间空行。
 
 字段级 pass 会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
 
@@ -373,14 +380,13 @@ struct Foo {                  struct Foo {
 | `#[derive(Ord)]` 或 `#[derive(PartialOrd)]` | 派生比较按字段/变体声明顺序读 |
 | `enum` 任一变体带显式 discriminant（`A = 1`） | 重排会无声修改其它变体的隐式值 |
 | 元组 struct / 元组变体 / 单元 struct / 单元变体 | 没有字段名可分组 |
-| 单行布局（`struct S { a: u8, b: u8 }`） | 行级切片无法干净地分离它们，保持原样 |
 | 字段数 < 2 | 没东西可排 |
 
 这些跳过规则故意写得保守，目标是"默认开启字段重排始终是安全的"。如果你的代码里发现还有该跳过的场景，请提 issue。
 
-## 关于 `--no-reorder-inline-mods`
+## 关于 `--no-inline-mods`
 
-默认 cargo-reorder 会递归进入 inline `mod foo { ... }`,用同一套规则处理它的 body(再深一层的 inline mod 也会递归)。加 `--no-reorder-inline-mods` 之后只排**文件顶层**的 item,所有 inline mod 的 body 保持字节不动。
+默认 cargo-reorder 会递归进入 inline `mod foo { ... }`,用同一套规则处理它的 body(再深一层的 inline mod 也会递归)。加 `--no-inline-mods` 之后只排**文件顶层**的 item,所有 inline mod 的 body 保持字节不动。
 
 **有意跳过**的三种 mod —— 它们的 item 顺序属于公共契约或影响编译语义：
 
@@ -392,7 +398,7 @@ struct Foo {                  struct Foo {
 
 只要 body 里**有一个非-`use` 的 item**,这个 mod 就是合格目标。inline mod body 内的 `macro_rules!` 同样作为 barrier 处理 —— 在 body 内部钉位,body 内任何其他 item 都不能跨过它。
 
-默认开启 inline mod 递归。`prelude` 风格 mod 和 codegen 脚手架在生态里很常见,这些场景里的 body 顺序往往是 API 契约的一部分 —— 上面表格里的几类(`#[cfg(test)] mod`、`#[macro_use] mod`、纯 `use` mod)会被自动跳过 body 重排,对其他 inline mod 才递归。如果某个项目里还想完全关掉 inline mod 递归,加 `--no-reorder-inline-mods` 即可。
+默认开启 inline mod 递归。`prelude` 风格 mod 和 codegen 脚手架在生态里很常见,这些场景里的 body 顺序往往是 API 契约的一部分 —— 上面表格里的几类(`#[cfg(test)] mod`、`#[macro_use] mod`、纯 `use` mod)会被自动跳过 body 重排,对其他 inline mod 才递归。如果某个项目里还想完全关掉 inline mod 递归,加 `--no-inline-mods` 即可。
 
 ## 注释和属性
 
@@ -476,17 +482,24 @@ cargo reorder --all
 | `tests/items.rs` | 16 种顶层 item 各自归到正确分类 |
 | `tests/imports.rs` | `extern crate` / `use` / `pub use` 分组和别名 |
 | `tests/impls.rs` | impl 锚定 + inherent → std → crate → external 四档排序 |
+| `tests/impl_trait_body.rs` | `impl`/`trait` body 内成员重排（const → type → fn → async fn） |
+| `tests/fields.rs` | struct/union 字段分组、enum 变体排序、前缀分组排序 |
+| `tests/top_level_grouping.rs` | 顶层同类别 struct/enum/trait/fn 前缀分组 |
 | `tests/macros.rs` | 宏 item 作为 barrier 的语义:钉位、段隔离、idempotent |
 | `tests/cross_file.rs` | `mod foo;` 文件查找、`#[path]` 重定向、子文件缺失 fallback |
+| `tests/inline_mods.rs` | inline `mod foo { ... }` 递归、skip-list、嵌套 inline mod |
 | `tests/comments.rs` | leading 注释、内部 doc、文件头注释块 |
+| `tests/floating_comments.rs` | 浮动注释围栏:检测、锚定、与排序的交互 |
 | `tests/attributes.rs` | `#[derive]` / `#[cfg]` / `#[cfg_attr]` / 多行属性 |
 | `tests/generics.rs` | 生命周期、where 子句、const 泛型、GAT、HRTB、async trait |
 | `tests/visibility.rs` | `pub` / `pub(crate)` / `pub(super)` / `pub(in path)` 往返 |
 | `tests/flags.rs` | 所有 `Config` flag 端到端 |
+| `tests/filter_mode.rs` | 管道 stdin → stdout 模式、无文件发现路径 |
+| `tests/fmt_flag.rs` | `--fmt` 委托 `cargo fmt` 并传递匹配的筛选参数 |
 | `tests/frontmatter.rs` | RFC 3502 cargo-script frontmatter |
 | `tests/idempotence.rs` | 复杂代表性文件 round-trip |
 | `tests/edge_cases.rs` | unicode / 原始字符串 / 多空行 / inline mod / EOF 无换行 |
-| `tests/discover.rs` | `cargo metadata` 文件发现、`--all` / `-p` / `--manifest-path` |
+| `tests/discover.rs` | `cargo metadata` 文件发现、`-p` / `--all` / `--manifest-path` |
 
 ### 验证过程中发现的注意点
 

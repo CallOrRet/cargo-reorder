@@ -244,17 +244,12 @@ pub(crate) struct Block {
 /// indirection). See README for the rationale on each flag.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
-    pub no_tests_last: bool,
-    /// Disable splitting imports into std / external / crate-local groups.
-    pub no_import_groups: bool,
-    /// Disable anchoring `impl` blocks to their target type
-    /// (inherent → std trait → external trait).
-    pub no_impl_grouping: bool,
-    /// Disable putting `mod foo;` before `use ...;`. Default is
-    /// mod-first — matches the majority pattern in our 21-project
-    /// sample (12/21 mod-first vs 7/21 use-first); see README.
-    pub no_mod_before_use: bool,
+    /// Enable reordering function parameter lists. This is off by
+    /// default because parameter order is part of a function's call
+    /// contract. When on, the first receiver parameter (`self`,
+    /// `mut self`, `&self`, `&mut self`) stays first and the remaining
+    /// ordinary identifier parameters use the field grouping rule.
+    pub fn_args: bool,
     /// Disable reordering named fields inside `struct` / `union` /
     /// `enum` (and inside enum variants). When off, fields are grouped by
     /// their snake_case / PascalCase / camelCase first word, within each
@@ -264,29 +259,45 @@ pub struct Config {
     /// skipped: any `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`,
     /// enums whose any variant carries an explicit discriminant, and
     /// tuple/unit variants.
-    pub no_reorder_fields: bool,
+    pub no_fields: bool,
     /// Disable the prefix-group + length sort applied **inside `impl`
     /// and `trait` bodies** (the const → type → fn → async fn category
     /// order, plus the within-category prefix sort). When on, the body
     /// of every `impl` / `trait` is left in the user's source order.
     /// Field-level and top-level grouping are unaffected — those stay
-    /// under `no_reorder_fields`.
-    pub no_reorder_impl_fns: bool,
+    /// under `no_fields`.
+    pub no_impl_fns: bool,
+    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
+    pub no_tests_last: bool,
+    /// Disable recursing into inline `mod foo { ... }` blocks.
+    /// See README for the skip list (test mods, `#[macro_use]` mods,
+    /// pure-`use` mods) — those are always skipped regardless.
+    pub no_inline_mods: bool,
+    /// Disable anchoring `impl` blocks to their target type
+    /// (inherent → std trait → external trait).
+    pub no_impl_grouping: bool,
+    /// Disable splitting imports into std / external / crate-local groups.
+    pub no_import_groups: bool,
+    /// Disable putting `mod foo;` before `use ...;`. Default is
+    /// mod-first — matches the majority pattern in our 21-project
+    /// sample (12/21 mod-first vs 7/21 use-first); see README.
+    pub no_mod_before_use: bool,
+    /// Disable ordering shorter trait paths first
+    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
+    pub no_short_trait_first: bool,
     /// Disable preserving `pub mod` / `mod` source order. With this
     /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
     /// blank-line separator between them.
     pub no_preserve_mod_order: bool,
+    /// Disable reordering same-line field-like lists: single-line
+    /// `struct` / `union` / `enum` definitions, struct-literal
+    /// expressions. By default these entries are permuted in-place and
+    /// the output stays single-line.
+    pub no_single_line_fields: bool,
     /// Disable putting `trait` ahead of `enum` / `struct` / `union`.
     /// Default is trait-first — matches the majority in our sample
     /// (14/20 trait-first; see README).
     pub no_trait_before_struct: bool,
-    /// Disable recursing into inline `mod foo { ... }` blocks.
-    /// See README for the skip list (test mods, `#[macro_use]` mods,
-    /// pure-`use` mods) — those are always skipped regardless.
-    pub no_reorder_inline_mods: bool,
-    /// Disable ordering shorter trait paths first
-    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
-    pub no_short_trait_path_first: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -312,7 +323,7 @@ pub(crate) struct SortKey {
     impl_kind: u8,
     /// Trait-path segment count for trait `impl` blocks (0 for non-impls
     /// and inherent impls). Shorter paths sort first when
-    /// `short_trait_path_first` is on; otherwise this is always 0 and
+    /// `short_trait_first` is on; otherwise this is always 0 and
     /// the field is inert.
     trait_path_len: u8,
     /// Sub-bucket inside a category. For `use` items it encodes the
@@ -372,7 +383,7 @@ fn type_last_segment(ty: &syn::Type) -> Option<String> {
 }
 
 /// Internal entry point. Recurses into itself for cargo-script
-/// frontmatter stripping and (when `!cfg.no_reorder_inline_mods` is on)
+/// frontmatter stripping and (when `!cfg.no_inline_mods` is on)
 /// for inline `mod foo { ... }` body recursion.
 fn reorder_inner(
     source: &str,
@@ -395,7 +406,7 @@ fn reorder_inner(
         return Ok(source.to_string());
     }
 
-    let owned: Option<String> = if !cfg.no_reorder_inline_mods {
+    let owned: Option<String> = if !cfg.no_inline_mods {
         let new_source = recurse_inline_mods(source, &parsed, cfg)?;
         if let Some(new_src) = new_source {
             parsed = syn::parse_file(&new_src)?;
@@ -483,7 +494,7 @@ fn reorder_inner(
     // Build per-item group keys. Only categories the user wants
     // grouped get a key; other items fall back to source order.
     let mut group_keys: HashMap<usize, GroupSortKey> = HashMap::new();
-    if !cfg.no_reorder_fields {
+    if !cfg.no_fields {
         for (cat, names) in &category_names {
             if !is_top_level_groupable(*cat) {
                 continue;
@@ -552,15 +563,30 @@ fn reorder_inner(
             String::new()
         };
         let body = take_lines(&lines, start, end);
-        let body = if cfg.no_reorder_fields {
+        let body = if cfg.no_fields {
             body
-        } else if cfg.no_reorder_impl_fns && matches!(item, Item::Impl(_) | Item::Trait(_)) {
-            // `--no-reorder-impl-fns`: keep impl/trait bodies in
+        } else if cfg.no_impl_fns && matches!(item, Item::Impl(_) | Item::Trait(_)) {
+            // `--no-impl-fns`: keep impl/trait bodies in
             // source order. Field-level (struct/union/enum) reorder
             // still runs — that's a separate pass.
             body
         } else {
             crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+        };
+        let body = if cfg.no_fields {
+            body
+        } else {
+            crate::fields::reorder_expr_structs_in_item_text(&body).unwrap_or(body)
+        };
+        let body = if cfg.no_fields || cfg.no_single_line_fields {
+            body
+        } else {
+            crate::fields::reorder_single_line_lists_in_item_text(&body).unwrap_or(body)
+        };
+        let body = if cfg.fn_args {
+            crate::fields::reorder_fn_args_in_item_text(&body).unwrap_or(body)
+        } else {
+            body
         };
         let category = Category::classify(item);
         let import_group = match item {
@@ -868,7 +894,7 @@ fn compute_sort_key(
                     scope.local_traits,
                 ),
             };
-            let trait_path_len = if !cfg.no_short_trait_path_first {
+            let trait_path_len = if !cfg.no_short_trait_first {
                 im.trait_
                     .as_ref()
                     .map(|(_, p, _)| p.segments.len().min(u8::MAX as usize) as u8)

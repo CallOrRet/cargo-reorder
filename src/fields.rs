@@ -30,9 +30,11 @@
 //!   names to group on.
 
 use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Fields, FieldsNamed, GenericParam, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct,
-    ItemTrait, ItemUnion, TraitBoundModifier, TraitItem, TypeParamBound, WherePredicate,
+    Attribute, ExprStruct, Fields, FieldsNamed, FnArg, GenericParam, ImplItem, Item, ItemEnum,
+    ItemImpl, ItemStruct, ItemTrait, ItemUnion, Member, Pat, Signature, TraitBoundModifier,
+    TraitItem, TypeParamBound, WherePredicate,
 };
 
 /// Sentinel bucket value that pins an entry to the very end of the
@@ -55,6 +57,15 @@ struct SortableLines {
     last_line: usize,
 
     first_line: usize,
+}
+
+#[derive(Clone)]
+struct SortableSpan {
+    name: String,
+
+    lo: usize,
+
+    hi: usize,
 }
 
 /// First "word" of an identifier — text up to the first `_` (snake_case)
@@ -99,6 +110,26 @@ fn lines_slice(text: &str, text_start_line: usize, line_lo: usize, line_hi: usiz
     lines[lo..=hi].concat()
 }
 
+fn byte_offset_for_line_col(text: &str, line: usize, col: usize) -> Option<usize> {
+    let mut byte = 0usize;
+    for (idx, l) in split_lines(text).iter().enumerate() {
+        if idx + 1 == line {
+            let line_text = l.strip_suffix('\n').unwrap_or(l);
+            return (col <= line_text.len()).then_some(byte + col);
+        }
+        byte += l.len();
+    }
+    None
+}
+
+fn byte_range_for_span(text: &str, span: proc_macro2::Span) -> Option<(usize, usize)> {
+    let start = span.start();
+    let end = span.end();
+    let lo = byte_offset_for_line_col(text, start.line, start.column)?;
+    let hi = byte_offset_for_line_col(text, end.line, end.column)?;
+    (lo < hi).then_some((lo, hi))
+}
+
 fn member_entry(
     attrs: &[Attribute],
     ident: &syn::Ident,
@@ -124,7 +155,34 @@ fn member_entry(
 /// Returns the reordered text. Lines outside the entries' ranges
 /// (header, closing brace, comments before/after the field block) are
 /// preserved.
+#[derive(Clone, Copy)]
+struct LineSortOptions {
+    include_leading_blank_lines: bool,
+    insert_blank_lines_between_groups: bool,
+}
+
+impl Default for LineSortOptions {
+    fn default() -> Self {
+        Self {
+            include_leading_blank_lines: false,
+            insert_blank_lines_between_groups: true,
+        }
+    }
+}
+
 fn sort_top_level<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
+where
+    I: IntoIterator<Item = SortableLines>,
+{
+    sort_top_level_with_options(text, text_start_line, entries, LineSortOptions::default())
+}
+
+fn sort_top_level_with_options<I>(
+    text: &str,
+    text_start_line: usize,
+    entries: I,
+    options: LineSortOptions,
+) -> Option<String>
 where
     I: IntoIterator<Item = SortableLines>,
 {
@@ -151,9 +209,11 @@ where
 
     // Translate each entry's source line numbers to indices into
     // `lines`. A line that's `text_start_line + i` maps to `lines[i]`.
-    // We *expand* each entry's line range to also cover comment / blank
-    // lines that immediately precede it (so `///` doc comments travel
-    // with the field). The expansion stops when we hit either:
+    // We *expand* each entry's line range to also cover comment lines
+    // that immediately precede it (so `///` doc comments travel with
+    // the field). Some callers also opt into preserving immediately
+    // preceding blank lines as leading trivia. The expansion stops
+    // when we hit either:
     //   - the previous entry's last line, OR
     //   - the line that contains the opening `{` of the block, OR
     //   - a blank line that is itself preceded by a non-comment line
@@ -169,8 +229,9 @@ where
     for e in &entries {
         let first_idx = to_idx(e.first_line)?;
         let last_idx = to_idx(e.last_line)?;
-        // Expand backwards over preceding `///`, `//`, `#[...]`, blank
-        // lines that look like part of this field's leading trivia.
+        // Expand backwards over preceding `///`, `//`, `#[...]`, and
+        // optionally blank lines that look like part of this entry's
+        // leading trivia.
         let mut start = first_idx;
         while start > prev_end.map(|p| p + 1).unwrap_or(0) {
             let prev = lines[start - 1].trim_start();
@@ -178,6 +239,7 @@ where
                 || prev.starts_with("//!")
                 || prev.starts_with("#[")
                 || prev.starts_with("//")
+                || (options.include_leading_blank_lines && prev.trim().is_empty())
             {
                 start -= 1;
             } else {
@@ -246,11 +308,12 @@ where
         .map(|i| std::mem::take(&mut groups[i]))
         .collect();
 
-    // Emit: each entry's slice (which already ends with \n), with a
-    // blank line between groups.
+    // Emit: each entry's slice (which already ends with \n). Field and
+    // member callers insert a blank line between groups; function
+    // parameters use the same ordering rule without adding separators.
     let mut body = String::new();
     for (gi, g) in groups.iter().enumerate() {
-        if gi > 0 {
+        if options.insert_blank_lines_between_groups && gi > 0 {
             body.push('\n');
         }
         for &i in g {
@@ -287,6 +350,153 @@ pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -
         Item::Impl(i) => rewrite_impl(i, body_text, start_line),
         Item::Trait(t) => rewrite_trait(t, body_text, start_line),
         _ => None,
+    }
+}
+
+/// Reorder named fields in struct-literal expressions (`S { ... }`,
+/// `U { ... }`, `E::V { ... }`) using the same grouping rule as
+/// declaration fields. The caller passes one complete item body; we
+/// re-parse after each successful rewrite so nested literals are handled
+/// from the inside out without stale spans.
+pub(crate) fn reorder_expr_structs_in_item_text(body_text: &str) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut collector = ExprStructCollector::default();
+        collector.visit_item(&parsed);
+        collector.exprs.sort_by_key(|expr| {
+            let start = expr.span().start();
+            std::cmp::Reverse((start.line, start.column))
+        });
+
+        let mut rewrote_one = false;
+        for expr in collector.exprs {
+            if let Some(rewritten) = rewrite_expr_struct(&out, 1, &expr) {
+                if rewritten != out {
+                    out = rewritten;
+                    changed = true;
+                    rewrote_one = true;
+                    break;
+                }
+            }
+        }
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+#[derive(Default)]
+struct ExprStructCollector {
+    exprs: Vec<ExprStruct>,
+}
+
+impl<'ast> Visit<'ast> for ExprStructCollector {
+    fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
+        self.exprs.push(node.clone());
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+pub(crate) fn reorder_single_line_lists_in_item_text(body_text: &str) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut lists = single_line_lists_for_item(&out, &parsed);
+        let mut collector = SingleLineListCollector::new(&out);
+        collector.visit_item(&parsed);
+        lists.extend(collector.lists);
+        lists.sort_by_key(|entries| std::cmp::Reverse(entries.first().map(|e| e.lo).unwrap_or(0)));
+
+        let mut rewrote_one = false;
+        for entries in lists {
+            if let Some(rewritten) = rewrite_single_line_list(&out, &entries) {
+                out = rewritten;
+                changed = true;
+                rewrote_one = true;
+                break;
+            }
+        }
+
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+struct SingleLineListCollector<'a> {
+    lists: Vec<Vec<SortableSpan>>,
+    text: &'a str,
+}
+
+impl<'a> SingleLineListCollector<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            lists: Vec::new(),
+            text,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SingleLineListCollector<'_> {
+    fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
+        if let Some(entries) = expr_struct_single_line_entries(self.text, node) {
+            self.lists.push(entries);
+        }
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+pub(crate) fn reorder_fn_args_in_item_text(body_text: &str) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut collector = SignatureCollector::default();
+        collector.visit_item(&parsed);
+        collector.sigs.sort_by_key(|sig| {
+            let start = sig.span().start();
+            std::cmp::Reverse((start.line, start.column))
+        });
+
+        let mut rewrote_one = false;
+        for sig in collector.sigs {
+            if let Some(rewritten) = rewrite_signature_args(&out, &sig) {
+                if rewritten != out {
+                    out = rewritten;
+                    changed = true;
+                    rewrote_one = true;
+                    break;
+                }
+            }
+        }
+
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+#[derive(Default)]
+struct SignatureCollector {
+    sigs: Vec<Signature>,
+}
+
+impl<'ast> Visit<'ast> for SignatureCollector {
+    fn visit_signature(&mut self, node: &'ast Signature) {
+        self.sigs.push(node.clone());
+        visit::visit_signature(self, node);
     }
 }
 
@@ -458,6 +668,240 @@ fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<
     // the rest reorder normally.
     let pin_last = has_unsized_generic(&s.generics);
     rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
+}
+
+fn rewrite_expr_struct(text: &str, text_start_line: usize, expr: &ExprStruct) -> Option<String> {
+    if expr.fields.len() < 2 {
+        return None;
+    }
+    if expr
+        .fields
+        .iter()
+        .any(|f| !matches!(f.member, Member::Named(_)))
+    {
+        return None;
+    }
+    sort_top_level(
+        text,
+        text_start_line,
+        expr.fields.iter().map(|f| {
+            let name = match &f.member {
+                Member::Named(ident) => ident.to_string(),
+                Member::Unnamed(_) => String::new(),
+            };
+            let earliest_attr = f.attrs.first().map(|a| a.span());
+            let span = f.span();
+            let first_line = earliest_attr
+                .map(|s| s.start().line)
+                .unwrap_or_else(|| span.start().line);
+            let last_line = span.end().line;
+            SortableLines {
+                first_line,
+                last_line,
+                name,
+                bucket: 0,
+            }
+        }),
+    )
+}
+
+fn single_line_lists_for_item(text: &str, item: &Item) -> Vec<Vec<SortableSpan>> {
+    let mut out = Vec::new();
+    match item {
+        Item::Struct(s) if !container_skips(&s.attrs) => {
+            if let Fields::Named(named) = &s.fields {
+                if let Some(entries) = fields_named_single_line_entries(text, named) {
+                    out.push(entries);
+                }
+            }
+        }
+        Item::Union(u) if !container_skips(&u.attrs) => {
+            if let Some(entries) = fields_named_single_line_entries(text, &u.fields) {
+                out.push(entries);
+            }
+        }
+        Item::Enum(e)
+            if !container_skips(&e.attrs)
+                && !e.variants.iter().any(|v| v.discriminant.is_some()) =>
+        {
+            if let Some(entries) = enum_variant_single_line_entries(text, e) {
+                out.push(entries);
+            }
+            for v in &e.variants {
+                if let Fields::Named(named) = &v.fields {
+                    if let Some(entries) = fields_named_single_line_entries(text, named) {
+                        out.push(entries);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn fields_named_single_line_entries(text: &str, named: &FieldsNamed) -> Option<Vec<SortableSpan>> {
+    if named.named.len() < 2 || named.named.iter().any(|f| !f.attrs.is_empty()) {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(named.named.len());
+    for f in &named.named {
+        let name = f.ident.as_ref()?.to_string();
+        let (lo, hi) = byte_range_for_span(text, f.span())?;
+        entries.push(SortableSpan { name, lo, hi });
+    }
+    single_line_entries(entries)
+}
+
+fn expr_struct_single_line_entries(text: &str, expr: &ExprStruct) -> Option<Vec<SortableSpan>> {
+    if expr.fields.len() < 2 {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(expr.fields.len());
+    for f in &expr.fields {
+        if !f.attrs.is_empty() {
+            return None;
+        }
+        let Member::Named(ident) = &f.member else {
+            return None;
+        };
+        let (lo, hi) = byte_range_for_span(text, f.span())?;
+        entries.push(SortableSpan {
+            name: ident.to_string(),
+            lo,
+            hi,
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn enum_variant_single_line_entries(text: &str, e: &ItemEnum) -> Option<Vec<SortableSpan>> {
+    if e.variants.len() < 2 || e.variants.iter().any(|v| !v.attrs.is_empty()) {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(e.variants.len());
+    for v in &e.variants {
+        let (lo, hi) = byte_range_for_span(text, v.span())?;
+        entries.push(SortableSpan {
+            name: v.ident.to_string(),
+            lo,
+            hi,
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn rewrite_signature_args(text: &str, sig: &Signature) -> Option<String> {
+    let entries = signature_arg_entries(text, sig)?;
+    rewrite_single_line_list(text, &entries).or_else(|| {
+        sort_top_level_with_options(
+            text,
+            1,
+            entries.iter().map(|e| {
+                let span = &text[e.lo..e.hi];
+                let first_line = 1 + text[..e.lo].bytes().filter(|b| *b == b'\n').count();
+                let last_line = first_line + span.bytes().filter(|b| *b == b'\n').count();
+                SortableLines {
+                    name: e.name.clone(),
+                    bucket: 0,
+                    first_line,
+                    last_line,
+                }
+            }),
+            LineSortOptions {
+                include_leading_blank_lines: true,
+                insert_blank_lines_between_groups: false,
+            },
+        )
+    })
+}
+
+fn signature_arg_entries(text: &str, sig: &Signature) -> Option<Vec<SortableSpan>> {
+    if sig.inputs.len() < 2 {
+        return None;
+    }
+    let mut inputs = sig.inputs.iter();
+    if matches!(inputs.clone().next(), Some(FnArg::Receiver(_))) {
+        inputs.next();
+    }
+
+    let mut entries = Vec::with_capacity(sig.inputs.len());
+    for input in inputs {
+        let FnArg::Typed(pat) = input else {
+            return None;
+        };
+        if !pat.attrs.is_empty() {
+            return None;
+        }
+        let Pat::Ident(ident) = pat.pat.as_ref() else {
+            return None;
+        };
+        let (lo, hi) = byte_range_for_span(text, input.span())?;
+        entries.push(SortableSpan {
+            name: ident.ident.to_string(),
+            lo,
+            hi,
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn single_line_entries(mut entries: Vec<SortableSpan>) -> Option<Vec<SortableSpan>> {
+    if entries.len() < 2 {
+        return None;
+    }
+    entries.sort_by_key(|e| e.lo);
+    let mut prev_hi = 0usize;
+    for e in &entries {
+        if e.lo < prev_hi {
+            return None;
+        }
+        prev_hi = e.hi;
+    }
+    // Byte offsets are not enough to prove same-line; ask the spans'
+    // source text slice range not to contain a newline across the whole
+    // list. This keeps the byte-level rewrite scoped to one physical line.
+    if entries.iter().any(|e| e.name.is_empty()) {
+        return None;
+    }
+    Some(entries)
+}
+
+fn rewrite_single_line_list(text: &str, entries: &[SortableSpan]) -> Option<String> {
+    if entries.len() < 2 {
+        return None;
+    }
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|e| e.lo);
+    let lo = entries.first()?.lo;
+    let hi = entries.last()?.hi;
+    if text.get(lo..hi)?.contains('\n') {
+        return None;
+    }
+
+    let keys = compute_group_keys(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (idx, e.name.as_str())),
+    );
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|idx| (keys[idx], *idx));
+
+    let replacement = order
+        .iter()
+        .map(|idx| text[entries[*idx].lo..entries[*idx].hi].trim())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if replacement == text[lo..hi] {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len() - (hi - lo) + replacement.len());
+    out.push_str(&text[..lo]);
+    out.push_str(&replacement);
+    out.push_str(&text[hi..]);
+    Some(out)
 }
 
 /// Take a named-fields block (`{ a: u8, b: u16 }`) and rewrite the

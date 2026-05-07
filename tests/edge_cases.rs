@@ -97,12 +97,12 @@ mod inner {
 use std::fmt;
 ";
     let cfg = Config {
-        no_reorder_inline_mods: true,
+        no_inline_mods: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
     syn::parse_file(&out).unwrap();
-    // With `no_reorder_inline_mods: true` we only reorder TOP-level items.
+    // With `no_inline_mods: true` we only reorder TOP-level items.
     // The inline `mod inner { ... }` body is treated as opaque — its
     // inner items are not reshuffled.
     assert!(out.contains("mod inner {\n    pub fn helper() {}\n    use crate::shared::Thing;\n    pub struct Inside;\n}"),

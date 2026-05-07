@@ -1,7 +1,7 @@
 //! Coverage for inline-mod reordering. Default ON: bodies are
 //! reordered with the same rules, except for the documented skip
 //! list (test mods, `#[macro_use]`, pure-`use` mods). With
-//! `--no-reorder-inline-mods` (i.e. `Config { no_reorder_inline_mods:
+//! `--no-inline-mods` (i.e. `Config { no_inline_mods:
 //! true, ..default() }`), inline mod bodies stay byte-identical to
 //! the source.
 
@@ -319,7 +319,7 @@ mod inner {
 }
 ";
     let cfg = Config {
-        no_reorder_inline_mods: true,
+        no_inline_mods: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
