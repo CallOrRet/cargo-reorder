@@ -5,6 +5,21 @@
 //! preserves trailing newlines on each line, so `concat()`-ing slices of
 //! its output reconstructs the input verbatim.
 
+/// Concatenate `lines[from-1 ..= to-1]`. Inputs are 1-indexed and clamped
+/// against the slice bounds; out-of-range or `from > to` returns "".
+pub(crate) fn take_lines(lines: &[&str], from: usize, to: usize) -> String {
+    if from == 0 || from > to || from > lines.len() {
+        return String::new();
+    }
+    let lo = from - 1;
+    let hi = to.min(lines.len());
+    lines[lo..hi].concat()
+}
+
+pub(crate) fn line_is_blank(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
 /// Split `s` at every `\n`, keeping the newline as the last byte of each
 /// returned slice. The final slice has no newline if `s` doesn't end in
 /// one. `concat()`-ing the result reconstructs `s` byte-for-byte.
@@ -24,17 +39,6 @@ pub(crate) fn split_keep_endings(s: &str) -> Vec<&str> {
         out.push(&s[start..]);
     }
     out
-}
-
-/// Concatenate `lines[from-1 ..= to-1]`. Inputs are 1-indexed and clamped
-/// against the slice bounds; out-of-range or `from > to` returns "".
-pub(crate) fn take_lines(lines: &[&str], from: usize, to: usize) -> String {
-    if from == 0 || from > to || from > lines.len() {
-        return String::new();
-    }
-    let lo = from - 1;
-    let hi = to.min(lines.len());
-    lines[lo..hi].concat()
 }
 
 /// Split `region` at the last blank line. Everything up to and including
@@ -86,16 +90,12 @@ pub(crate) fn split_at_last_blank(region: &str) -> (String, String) {
     (before, after)
 }
 
-pub(crate) fn line_is_blank(line: &str) -> bool {
-    line.trim().is_empty()
+pub(crate) fn ends_with_blank_line(s: &str) -> bool {
+    s.ends_with("\n\n") || s.ends_with("\r\n\r\n")
 }
 
 pub(crate) fn starts_with_blank_line(s: &str) -> bool {
     s.starts_with('\n') || s.starts_with("\r\n")
-}
-
-pub(crate) fn ends_with_blank_line(s: &str) -> bool {
-    s.ends_with("\n\n") || s.ends_with("\r\n\r\n")
 }
 
 /// If `gap` between two items looks like

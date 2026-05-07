@@ -97,6 +97,86 @@ path = "src/lib.rs"
 }
 
 #[test]
+fn follows_path_attribute() {
+    let ws = Workspace::new("path_attr");
+    ws.write(
+        "Cargo.toml",
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "src/lib.rs"
+"#,
+    );
+    ws.write(
+        "src/lib.rs",
+        "#[path = \"weird/place.rs\"]\npub mod relocated;\n",
+    );
+    ws.write("src/weird/place.rs", "pub fn p() {}\n");
+
+    let opts = DiscoverOptions {
+        all_packages: false,
+        packages: &[],
+        manifest_path: Some(&ws.manifest()),
+    };
+    let found = discover(opts).expect("discover");
+    let found: Vec<PathBuf> = found.into_iter().map(|p| canonical(&p)).collect();
+    let want = canonical(&ws.dir.join("src/weird/place.rs"));
+    assert!(
+        found.contains(&want),
+        "missing path-attr file in {found:#?}"
+    );
+}
+
+#[test]
+fn descends_inline_modules() {
+    let ws = Workspace::new("inline");
+    ws.write(
+        "Cargo.toml",
+        r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "src/lib.rs"
+"#,
+    );
+    // Inline `mod outer` containing a `mod inner;` which lives at
+    // src/outer/inner.rs.
+    ws.write("src/lib.rs", "pub mod outer { pub mod inner; }\n");
+    ws.write("src/outer/inner.rs", "pub fn i() {}\n");
+
+    let opts = DiscoverOptions {
+        all_packages: false,
+        packages: &[],
+        manifest_path: Some(&ws.manifest()),
+    };
+    let found = discover(opts).expect("discover");
+    let found: Vec<PathBuf> = found.into_iter().map(|p| canonical(&p)).collect();
+    let want = canonical(&ws.dir.join("src/outer/inner.rs"));
+    assert!(found.contains(&want), "missing inner.rs in {found:#?}");
+}
+fn make_workspace_with_two_members() -> Workspace {
+    let ws = Workspace::new("ws_two");
+    ws.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"alpha\", \"beta\"]\nresolver = \"2\"\n",
+    );
+    ws.write(
+        "alpha/Cargo.toml",
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    ws.write("alpha/src/lib.rs", "pub fn a() {}\n");
+    ws.write(
+        "beta/Cargo.toml",
+        "[package]\nname = \"beta\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
+    );
+    ws.write("beta/src/lib.rs", "pub fn b() {}\n");
+    ws
+}
+
+#[test]
 fn includes_bin_test_example_targets() {
     let ws = Workspace::new("targets");
     ws.write(
@@ -137,76 +217,6 @@ path = "examples/ex.rs"
 }
 
 #[test]
-fn follows_path_attribute() {
-    let ws = Workspace::new("path_attr");
-    ws.write(
-        "Cargo.toml",
-        r#"[package]
-name = "demo"
-version = "0.1.0"
-edition = "2021"
-[lib]
-path = "src/lib.rs"
-"#,
-    );
-    ws.write(
-        "src/lib.rs",
-        "#[path = \"weird/place.rs\"]\npub mod relocated;\n",
-    );
-    ws.write("src/weird/place.rs", "pub fn p() {}\n");
-
-    let opts = DiscoverOptions {
-        all_packages: false,
-        packages: &[],
-        manifest_path: Some(&ws.manifest()),
-    };
-    let found = discover(opts).expect("discover");
-    let found: Vec<PathBuf> = found.into_iter().map(|p| canonical(&p)).collect();
-    let want = canonical(&ws.dir.join("src/weird/place.rs"));
-    assert!(
-        found.contains(&want),
-        "missing path-attr file in {found:#?}"
-    );
-}
-
-fn make_workspace_with_two_members() -> Workspace {
-    let ws = Workspace::new("ws_two");
-    ws.write(
-        "Cargo.toml",
-        "[workspace]\nmembers = [\"alpha\", \"beta\"]\nresolver = \"2\"\n",
-    );
-    ws.write(
-        "alpha/Cargo.toml",
-        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
-    );
-    ws.write("alpha/src/lib.rs", "pub fn a() {}\n");
-    ws.write(
-        "beta/Cargo.toml",
-        "[package]\nname = \"beta\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"src/lib.rs\"\n",
-    );
-    ws.write("beta/src/lib.rs", "pub fn b() {}\n");
-    ws
-}
-
-#[test]
-fn virtual_workspace_default_includes_all_members() {
-    let ws = make_workspace_with_two_members();
-    let opts = DiscoverOptions {
-        all_packages: false,
-        packages: &[],
-        manifest_path: Some(&ws.manifest()),
-    };
-    let found = discover(opts).unwrap();
-    let found: Vec<PathBuf> = found.into_iter().map(|p| canonical(&p)).collect();
-    // No root in a virtual workspace, so default behaviour falls through to
-    // every member.
-    for rel in ["alpha/src/lib.rs", "beta/src/lib.rs"] {
-        let want = canonical(&ws.dir.join(rel));
-        assert!(found.contains(&want), "missing {rel} in {found:#?}");
-    }
-}
-
-#[test]
 fn package_flag_filters_to_named_member() {
     let ws = make_workspace_with_two_members();
     let pkgs = ["alpha".to_string()];
@@ -237,30 +247,20 @@ fn package_flag_unknown_name_is_an_error() {
 }
 
 #[test]
-fn descends_inline_modules() {
-    let ws = Workspace::new("inline");
-    ws.write(
-        "Cargo.toml",
-        r#"[package]
-name = "demo"
-version = "0.1.0"
-edition = "2021"
-[lib]
-path = "src/lib.rs"
-"#,
-    );
-    // Inline `mod outer` containing a `mod inner;` which lives at
-    // src/outer/inner.rs.
-    ws.write("src/lib.rs", "pub mod outer { pub mod inner; }\n");
-    ws.write("src/outer/inner.rs", "pub fn i() {}\n");
-
+fn virtual_workspace_default_includes_all_members() {
+    let ws = make_workspace_with_two_members();
     let opts = DiscoverOptions {
         all_packages: false,
         packages: &[],
         manifest_path: Some(&ws.manifest()),
     };
-    let found = discover(opts).expect("discover");
+    let found = discover(opts).unwrap();
     let found: Vec<PathBuf> = found.into_iter().map(|p| canonical(&p)).collect();
-    let want = canonical(&ws.dir.join("src/outer/inner.rs"));
-    assert!(found.contains(&want), "missing inner.rs in {found:#?}");
+    // No root in a virtual workspace, so default behaviour falls through to
+    // every member.
+    for rel in ["alpha/src/lib.rs", "beta/src/lib.rs"] {
+        let want = canonical(&ws.dir.join(rel));
+        assert!(found.contains(&want), "missing {rel} in {found:#?}");
+    }
 }
+

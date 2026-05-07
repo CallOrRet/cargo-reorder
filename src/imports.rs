@@ -28,6 +28,17 @@ pub enum ImportGroup {
 }
 
 impl ImportGroup {
+    pub fn visual(self) -> VisualGroup {
+        match self {
+            ImportGroup::Std => VisualGroup::Std,
+            ImportGroup::External => VisualGroup::External,
+            ImportGroup::Crate
+            | ImportGroup::Super
+            | ImportGroup::Self_
+            | ImportGroup::LocalMod => VisualGroup::CrateLocal,
+        }
+    }
+
     /// Classify a `use` item. `local_mods` is the set of module names declared
     /// at the top level of the same file (so `mod foo;` makes
     /// `use foo::Bar;` resolve to a local module rather than an external
@@ -55,23 +66,14 @@ impl ImportGroup {
             }
         }
     }
-
-    pub fn visual(self) -> VisualGroup {
-        match self {
-            ImportGroup::Std => VisualGroup::Std,
-            ImportGroup::External => VisualGroup::External,
-            ImportGroup::Crate
-            | ImportGroup::Super
-            | ImportGroup::Self_
-            | ImportGroup::LocalMod => VisualGroup::CrateLocal,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualGroup {
     Std,
+
     External,
+
     CrateLocal,
 }
 

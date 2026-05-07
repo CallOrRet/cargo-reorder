@@ -11,6 +11,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+struct TempDir {
+    dir: PathBuf,
+}
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let mut dir = env::temp_dir();
+        let n = UNIQ.fetch_add(1, Ordering::Relaxed);
+        dir.push(format!(
+            "cargo-reorder-fmt-{name}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self { dir }
+    }
+
+    fn write(&self, rel: &str, src: &str) -> PathBuf {
+        let p = self.dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, src).unwrap();
+        p
+    }
+}
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
 fn binary_path() -> PathBuf {
     env::var_os("CARGO_BIN_EXE_cargo-reorder")
         .map(PathBuf::from)
@@ -32,35 +62,38 @@ fn cargo_fmt_present() -> bool {
         .unwrap_or(false)
 }
 
-struct TempDir {
-    dir: PathBuf,
-}
-
-impl TempDir {
-    fn new(name: &str) -> Self {
-        let mut dir = env::temp_dir();
-        let n = UNIQ.fetch_add(1, Ordering::Relaxed);
-        dir.push(format!(
-            "cargo-reorder-fmt-{name}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+#[test]
+fn fmt_flag_skipped_under_check_mode() {
+    if !cargo_fmt_present() {
+        return;
     }
-    fn write(&self, rel: &str, src: &str) -> PathBuf {
-        let p = self.dir.join(rel);
-        fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(&p, src).unwrap();
-        p
-    }
+    let td = TempDir::new("check");
+    td.write(
+        "Cargo.toml",
+        "[package]
+name = \"check_pkg\"
+version = \"0.0.1\"
+edition = \"2024\"
+",
+    );
+    let original = "fn  user_a(  ) {}
+fn  user_b(){}
+";
+    td.write("src/lib.rs", original);
+    let _ = Command::new(binary_path())
+        .arg("--fmt")
+        .arg("--check")
+        .arg("-p")
+        .arg("check_pkg")
+        .current_dir(&td.dir)
+        .output()
+        .unwrap();
+    // `--check` is read-only; neither cargo fmt (we skip it) nor the
+    // reorder pass (it only writes when `--check` is off) should
+    // touch the file.
+    let after = fs::read_to_string(td.dir.join("src/lib.rs")).unwrap();
+    assert_eq!(after, original, "file must not be touched under --check");
 }
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[test]
 fn fmt_flag_runs_cargo_fmt_then_reorders() {
     if !cargo_fmt_present() {
@@ -137,35 +170,3 @@ edition = \"2024\"
     );
 }
 
-#[test]
-fn fmt_flag_skipped_under_check_mode() {
-    if !cargo_fmt_present() {
-        return;
-    }
-    let td = TempDir::new("check");
-    td.write(
-        "Cargo.toml",
-        "[package]
-name = \"check_pkg\"
-version = \"0.0.1\"
-edition = \"2024\"
-",
-    );
-    let original = "fn  user_a(  ) {}
-fn  user_b(){}
-";
-    td.write("src/lib.rs", original);
-    let _ = Command::new(binary_path())
-        .arg("--fmt")
-        .arg("--check")
-        .arg("-p")
-        .arg("check_pkg")
-        .current_dir(&td.dir)
-        .output()
-        .unwrap();
-    // `--check` is read-only; neither cargo fmt (we skip it) nor the
-    // reorder pass (it only writes when `--check` is off) should
-    // touch the file.
-    let after = fs::read_to_string(td.dir.join("src/lib.rs")).unwrap();
-    assert_eq!(after, original, "file must not be touched under --check");
-}

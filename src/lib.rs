@@ -25,10 +25,6 @@
 //! Comments and blank-line separators are preserved as leading trivia on each
 //! item, so reordering is safe to apply automatically.
 
-pub use reorder::{
-    Config, ReorderError, reorder_source, reorder_source_with, reorder_source_with_path,
-};
-
 pub mod diagnostic;
 pub mod discover;
 
@@ -39,3 +35,8 @@ mod imports;
 mod macros;
 mod reorder;
 mod text;
+
+pub use reorder::{
+    Config, ReorderError, reorder_source, reorder_source_with, reorder_source_with_path,
+};
+

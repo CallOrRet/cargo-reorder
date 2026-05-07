@@ -55,20 +55,9 @@ pub(crate) fn assemble(
     out
 }
 
-fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
-    let already_blank = ends_with_blank_line(&p.trailing) || starts_with_blank_line(&blk.leading);
-    if already_blank {
-        return false;
-    }
-    if !cfg.no_import_groups && import_boundary(p, blk) {
-        return true;
-    }
-    if cfg.no_preserve_mod_order && pub_mod_boundary(p, blk) {
-        return true;
-    }
-    false
+fn is_import_like(c: Category) -> bool {
+    matches!(c, Category::ExternCrate | Category::Use | Category::PubUse)
 }
-
 fn import_boundary(p: &Block, blk: &Block) -> bool {
     let prev_visual = p.import_group.map(ImportGroup::visual);
     let blk_visual = blk.import_group.map(ImportGroup::visual);
@@ -85,6 +74,17 @@ fn pub_mod_boundary(p: &Block, blk: &Block) -> bool {
     p.category == Category::Mod && blk.category == Category::Mod && p.mod_is_pub != blk.mod_is_pub
 }
 
-fn is_import_like(c: Category) -> bool {
-    matches!(c, Category::ExternCrate | Category::Use | Category::PubUse)
+fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
+    let already_blank = ends_with_blank_line(&p.trailing) || starts_with_blank_line(&blk.leading);
+    if already_blank {
+        return false;
+    }
+    if !cfg.no_import_groups && import_boundary(p, blk) {
+        return true;
+    }
+    if cfg.no_preserve_mod_order && pub_mod_boundary(p, blk) {
+        return true;
+    }
+    false
 }
+

@@ -19,6 +19,24 @@ fn binary_path() -> PathBuf {
 }
 
 #[test]
+fn filter_mode_parse_error_exits_2() {
+    let input = "fn broken( {\n";
+    let mut child = Command::new(binary_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cargo-reorder");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(2), "parse error → exit 2");
+}
+#[test]
 fn filter_mode_reorders_stdin_to_stdout() {
     // Two free fns; the mean-length rule places `cache_get` ahead of
     // `user_login`. Source is well-formed so no rustfmt is needed.
@@ -43,21 +61,3 @@ fn filter_mode_reorders_stdin_to_stdout() {
     assert!(p_cache < p_user, "filter mode should reorder:\n{stdout}");
 }
 
-#[test]
-fn filter_mode_parse_error_exits_2() {
-    let input = "fn broken( {\n";
-    let mut child = Command::new(binary_path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cargo-reorder");
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().expect("wait");
-    assert_eq!(out.status.code(), Some(2), "parse error → exit 2");
-}

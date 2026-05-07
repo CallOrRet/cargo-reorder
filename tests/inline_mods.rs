@@ -30,6 +30,7 @@ impl TempDir {
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
+
     fn write(&self, rel: &str, src: &str) -> PathBuf {
         let p = self.dir.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -44,100 +45,81 @@ impl Drop for TempDir {
     }
 }
 
+#[test]
+fn pure_use_mod_skipped() {
+    // Prelude / __private style: 100% `use` items. Order is part of
+    // the contract; do not touch.
+    let input = "\
+pub mod prelude {
+    pub use crate::Foo;
+    pub use crate::error::Result;
+    pub use crate::traits::*;
+}
+";
+    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
+    let body_start = out.find("pub mod prelude {").unwrap();
+    let body = &out[body_start..];
+    let p_foo = body.find("pub use crate::Foo").unwrap();
+    let p_result = body.find("pub use crate::error::Result").unwrap();
+    let p_traits = body.find("pub use crate::traits::*").unwrap();
+    assert!(
+        p_foo < p_result && p_result < p_traits,
+        "pure-`use` mod ordering must be preserved:\n{out}"
+    );
+}
+
+#[test]
+fn macro_use_mod_body_skipped() {
+    let input = "\
+#[macro_use]
+mod helpers {
+    fn z() {}
+    macro_rules! gimme { () => { 1 }; }
+    use std::fmt;
+}
+fn caller() { gimme!(); }
+";
+    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
+    // Body must stay verbatim: `fn z`, then macro_rules, then use.
+    let body_start = out.find("mod helpers {").unwrap();
+    let body = &out[body_start..];
+    let p_z = body.find("fn z()").unwrap();
+    let p_macro = body.find("macro_rules! gimme").unwrap();
+    let p_use = body.find("use std::fmt").unwrap();
+    assert!(
+        p_z < p_macro && p_macro < p_use,
+        "#[macro_use] mod body must be left verbatim (macro visibility leaks):\n{out}"
+    );
+}
+
+#[test]
+fn idempotent_under_recursion() {
+    let input = "\
+mod a {
+    fn z() {}
+    use std::fmt;
+    mod inner {
+        struct S;
+        use core::mem;
+        fn helper() {}
+    }
+    struct Top;
+}
+fn outer_fn() {}
+use serde::Serialize;
+";
+    let pass1 = reorder_source_with(input, &cfg_recurse()).unwrap();
+    let pass2 = reorder_source_with(&pass1, &cfg_recurse()).unwrap();
+    assert_eq!(
+        pass1, pass2,
+        "recursive reorder must be idempotent:\n--- pass1 ---\n{pass1}\n--- pass2 ---\n{pass2}"
+    );
+}
+
 fn cfg_recurse() -> Config {
     // Inline-mod recursion is the default now; this helper exists only
     // so the test names stay self-documenting.
     Config::default()
-}
-
-#[test]
-fn opt_out_does_not_touch_inline_mod_body() {
-    let input = "\
-mod inner {
-    fn b() {}
-    use std::fmt;
-    struct S;
-}
-";
-    let cfg = Config {
-        no_reorder_inline_mods: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
-    // With opt-out, only top-level is reordered (one item here, so nothing
-    // moves). Body verbatim.
-    assert!(
-        out.contains("mod inner {\n    fn b() {}\n    use std::fmt;\n    struct S;\n}"),
-        "opt-out must leave inline mod body untouched:\n{out}"
-    );
-}
-
-#[test]
-fn flag_reorders_inline_mod_body() {
-    let input = "\
-mod inner {
-    fn b() {}
-    use std::fmt;
-    struct S;
-}
-";
-    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    let p_use = out.find("use std::fmt").unwrap();
-    let p_struct = out.find("struct S").unwrap();
-    let p_fn = out.find("fn b()").unwrap();
-    assert!(
-        p_use < p_struct && p_struct < p_fn,
-        "inline body must canonicalise: use < struct < fn:\n{out}"
-    );
-}
-
-#[test]
-fn flag_preserves_indentation() {
-    let input = "\
-mod inner {
-    fn b() {}
-    use std::fmt;
-}
-";
-    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    assert!(
-        out.contains("    use std::fmt;"),
-        "use line must keep its 4-space indent:\n{out}"
-    );
-    assert!(
-        out.contains("    fn b() {}"),
-        "fn line must keep its 4-space indent:\n{out}"
-    );
-}
-
-#[test]
-fn nested_inline_mods_recurse_too() {
-    let input = "\
-mod outer {
-    mod inner {
-        fn z() {}
-        use core::cmp::Ord;
-    }
-    fn at_outer() {}
-    use std::fmt;
-}
-";
-    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    let p_outer_use = out.find("use std::fmt").unwrap();
-    let p_inner_mod = out.find("mod inner").unwrap();
-    let p_outer_fn = out.find("fn at_outer").unwrap();
-    // Outer body canonicalised: mod < use < fn (default mod-first +
-    // use-after-mods + fn-late).
-    assert!(
-        p_inner_mod < p_outer_use && p_outer_use < p_outer_fn,
-        "outer body order:\n{out}"
-    );
-    let p_inner_use = out.find("use core::cmp::Ord").unwrap();
-    let p_inner_fn = out.find("fn z()").unwrap();
-    assert!(
-        p_inner_use < p_inner_fn,
-        "inner body must also be canonicalised:\n{out}"
-    );
 }
 
 #[test]
@@ -174,49 +156,70 @@ mod tests {
 }
 
 #[test]
-fn macro_use_mod_body_skipped() {
+fn nested_inline_mods_recurse_too() {
     let input = "\
-#[macro_use]
-mod helpers {
-    fn z() {}
-    macro_rules! gimme { () => { 1 }; }
+mod outer {
+    mod inner {
+        fn z() {}
+        use core::cmp::Ord;
+    }
+    fn at_outer() {}
     use std::fmt;
 }
-fn caller() { gimme!(); }
 ";
     let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    // Body must stay verbatim: `fn z`, then macro_rules, then use.
-    let body_start = out.find("mod helpers {").unwrap();
-    let body = &out[body_start..];
-    let p_z = body.find("fn z()").unwrap();
-    let p_macro = body.find("macro_rules! gimme").unwrap();
-    let p_use = body.find("use std::fmt").unwrap();
+    let p_outer_use = out.find("use std::fmt").unwrap();
+    let p_inner_mod = out.find("mod inner").unwrap();
+    let p_outer_fn = out.find("fn at_outer").unwrap();
+    // Outer body canonicalised: mod < use < fn (default mod-first +
+    // use-after-mods + fn-late).
     assert!(
-        p_z < p_macro && p_macro < p_use,
-        "#[macro_use] mod body must be left verbatim (macro visibility leaks):\n{out}"
+        p_inner_mod < p_outer_use && p_outer_use < p_outer_fn,
+        "outer body order:\n{out}"
+    );
+    let p_inner_use = out.find("use core::cmp::Ord").unwrap();
+    let p_inner_fn = out.find("fn z()").unwrap();
+    assert!(
+        p_inner_use < p_inner_fn,
+        "inner body must also be canonicalised:\n{out}"
     );
 }
 
 #[test]
-fn pure_use_mod_skipped() {
-    // Prelude / __private style: 100% `use` items. Order is part of
-    // the contract; do not touch.
+fn flag_preserves_indentation() {
     let input = "\
-pub mod prelude {
-    pub use crate::Foo;
-    pub use crate::error::Result;
-    pub use crate::traits::*;
+mod inner {
+    fn b() {}
+    use std::fmt;
 }
 ";
     let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    let body_start = out.find("pub mod prelude {").unwrap();
-    let body = &out[body_start..];
-    let p_foo = body.find("pub use crate::Foo").unwrap();
-    let p_result = body.find("pub use crate::error::Result").unwrap();
-    let p_traits = body.find("pub use crate::traits::*").unwrap();
     assert!(
-        p_foo < p_result && p_result < p_traits,
-        "pure-`use` mod ordering must be preserved:\n{out}"
+        out.contains("    use std::fmt;"),
+        "use line must keep its 4-space indent:\n{out}"
+    );
+    assert!(
+        out.contains("    fn b() {}"),
+        "fn line must keep its 4-space indent:\n{out}"
+    );
+}
+
+#[test]
+fn flag_reorders_inline_mod_body() {
+    let input = "\
+mod inner {
+    fn b() {}
+    use std::fmt;
+    struct S;
+}
+";
+    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
+    let p_use = out.find("use std::fmt").unwrap();
+    let p_struct = out.find("struct S").unwrap();
+    let p_fn = out.find("fn b()").unwrap();
+    assert!(
+        p_use < p_struct && p_struct < p_fn,
+        "inline body must canonicalise: use < struct < fn:\n{out}"
     );
 }
 
@@ -260,26 +263,28 @@ mod tests {
 }
 
 #[test]
-fn idempotent_under_recursion() {
+fn multiple_inline_mods_at_same_level() {
     let input = "\
 mod a {
     fn z() {}
-    use std::fmt;
-    mod inner {
-        struct S;
-        use core::mem;
-        fn helper() {}
-    }
-    struct Top;
+    use std::a as _;
 }
-fn outer_fn() {}
-use serde::Serialize;
+mod b {
+    fn z() {}
+    use std::b as _;
+}
 ";
-    let pass1 = reorder_source_with(input, &cfg_recurse()).unwrap();
-    let pass2 = reorder_source_with(&pass1, &cfg_recurse()).unwrap();
-    assert_eq!(
-        pass1, pass2,
-        "recursive reorder must be idempotent:\n--- pass1 ---\n{pass1}\n--- pass2 ---\n{pass2}"
+    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
+    // Each body independently reordered.
+    let body_a = &out[out.find("mod a {").unwrap()..out.find("mod b {").unwrap()];
+    assert!(
+        body_a.find("use std::a").unwrap() < body_a.find("fn z").unwrap(),
+        "mod a body reordered:\n{out}"
+    );
+    let body_b = &out[out.find("mod b {").unwrap()..];
+    assert!(
+        body_b.find("use std::b").unwrap() < body_b.find("fn z").unwrap(),
+        "mod b body reordered:\n{out}"
     );
 }
 
@@ -305,28 +310,74 @@ mod inner {
 }
 
 #[test]
-fn multiple_inline_mods_at_same_level() {
+fn opt_out_does_not_touch_inline_mod_body() {
     let input = "\
-mod a {
-    fn z() {}
-    use std::a as _;
-}
-mod b {
-    fn z() {}
-    use std::b as _;
+mod inner {
+    fn b() {}
+    use std::fmt;
+    struct S;
 }
 ";
-    let out = reorder_source_with(input, &cfg_recurse()).unwrap();
-    // Each body independently reordered.
-    let body_a = &out[out.find("mod a {").unwrap()..out.find("mod b {").unwrap()];
+    let cfg = Config {
+        no_reorder_inline_mods: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    // With opt-out, only top-level is reordered (one item here, so nothing
+    // moves). Body verbatim.
     assert!(
-        body_a.find("use std::a").unwrap() < body_a.find("fn z").unwrap(),
-        "mod a body reordered:\n{out}"
+        out.contains("mod inner {\n    fn b() {}\n    use std::fmt;\n    struct S;\n}"),
+        "opt-out must leave inline mod body untouched:\n{out}"
     );
-    let body_b = &out[out.find("mod b {").unwrap()..];
+}
+
+#[test]
+fn struct_before_trait_flag_propagates_into_inline_mods() {
+    let input = "\
+mod inner {
+    trait T {}
+    struct S;
+}
+";
+    let cfg = Config {
+        no_trait_before_struct: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    let p_struct = out.find("struct S").unwrap();
+    let p_trait = out.find("trait T").unwrap();
     assert!(
-        body_b.find("use std::b").unwrap() < body_b.find("fn z").unwrap(),
-        "mod b body reordered:\n{out}"
+        p_struct < p_trait,
+        "struct_before_trait must propagate into inline mod recursion:\n{out}"
+    );
+}
+/// `#[path = "..."]` on the inline mod doesn't change body-internal
+/// reordering — the macro-as-barrier rule applies inside the body
+/// regardless of where the (notional) child file would live.
+#[test]
+fn precise_macro_constraint_follows_inline_mod_path_attribute() {
+    let td = TempDir::new("inline-precise-path");
+    td.write(
+        "src/elsewhere/sub/bar.rs",
+        "pub fn helper() {\n    m!(\"hi\");\n}\n",
+    );
+    let lib = td.write(
+        "src/lib.rs",
+        r#"#[path = "elsewhere/sub/inline.rs"]
+pub mod foo {
+    macro_rules! m { ($e:expr) => { let _ = $e; }; }
+    pub mod bar;
+}
+"#,
+    );
+    let src = fs::read_to_string(&lib).unwrap();
+    let cfg = Config::default();
+    let out = reorder_source_with_path(&src, Some(&lib), &cfg).unwrap();
+    let p_macro = out.find("macro_rules! m").unwrap();
+    let p_mod = out.find("pub mod bar").unwrap();
+    assert!(
+        p_macro < p_mod,
+        "with #[path = \"elsewhere/sub/inline.rs\"] on the inline mod, child files resolve under elsewhere/sub/:\n{out}"
     );
 }
 
@@ -363,53 +414,3 @@ fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
     );
 }
 
-/// `#[path = "..."]` on the inline mod doesn't change body-internal
-/// reordering — the macro-as-barrier rule applies inside the body
-/// regardless of where the (notional) child file would live.
-#[test]
-fn precise_macro_constraint_follows_inline_mod_path_attribute() {
-    let td = TempDir::new("inline-precise-path");
-    td.write(
-        "src/elsewhere/sub/bar.rs",
-        "pub fn helper() {\n    m!(\"hi\");\n}\n",
-    );
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[path = "elsewhere/sub/inline.rs"]
-pub mod foo {
-    macro_rules! m { ($e:expr) => { let _ = $e; }; }
-    pub mod bar;
-}
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let cfg = Config::default();
-    let out = reorder_source_with_path(&src, Some(&lib), &cfg).unwrap();
-    let p_macro = out.find("macro_rules! m").unwrap();
-    let p_mod = out.find("pub mod bar").unwrap();
-    assert!(
-        p_macro < p_mod,
-        "with #[path = \"elsewhere/sub/inline.rs\"] on the inline mod, child files resolve under elsewhere/sub/:\n{out}"
-    );
-}
-
-#[test]
-fn struct_before_trait_flag_propagates_into_inline_mods() {
-    let input = "\
-mod inner {
-    trait T {}
-    struct S;
-}
-";
-    let cfg = Config {
-        no_trait_before_struct: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
-    let p_struct = out.find("struct S").unwrap();
-    let p_trait = out.find("trait T").unwrap();
-    assert!(
-        p_struct < p_trait,
-        "struct_before_trait must propagate into inline mod recursion:\n{out}"
-    );
-}

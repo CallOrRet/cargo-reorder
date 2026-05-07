@@ -5,19 +5,26 @@
 use cargo_reorder::reorder_source;
 
 #[test]
-fn derive_attribute_travels_with_struct() {
-    let input = "fn x() {}\n#[derive(Debug, Clone, PartialEq)]\npub struct S { f: u32 }\n";
+fn shebang_stays_at_top() {
+    let input = "#!/usr/bin/env rustc\n\nfn z() {}\nuse std::fmt;\n";
     let out = reorder_source(input).unwrap();
-    let p_attr = out.find("#[derive(Debug, Clone, PartialEq)]").unwrap();
-    let p_struct = out.find("pub struct S").unwrap();
-    let p_fn = out.find("fn x").unwrap();
-    assert!(p_attr < p_struct, "{out}");
-    let between = &out[p_attr..p_struct];
+    assert!(out.starts_with("#!/usr/bin/env rustc\n"), "{out}");
+}
+#[test]
+fn cfg_attr_form_preserved() {
+    let input = "\
+fn z() {}
+
+#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]
+pub struct Wrapped(u32);
+";
+    let out = reorder_source(input).unwrap();
     assert!(
-        !between.contains("fn"),
-        "fn should not be between derive and struct: {between:?}"
+        out.contains(
+            "#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]"
+        ),
+        "{out}"
     );
-    assert!(p_struct < p_fn, "{out}");
 }
 
 #[test]
@@ -61,23 +68,6 @@ pub struct Multi { v: u32 }
     );
     assert!(
         out.find("pub struct Multi").unwrap() < out.find("fn x").unwrap(),
-        "{out}"
-    );
-}
-
-#[test]
-fn cfg_attr_form_preserved() {
-    let input = "\
-fn z() {}
-
-#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]
-pub struct Wrapped(u32);
-";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains(
-            "#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]"
-        ),
         "{out}"
     );
 }
@@ -159,8 +149,18 @@ use std::fmt;
 }
 
 #[test]
-fn shebang_stays_at_top() {
-    let input = "#!/usr/bin/env rustc\n\nfn z() {}\nuse std::fmt;\n";
+fn derive_attribute_travels_with_struct() {
+    let input = "fn x() {}\n#[derive(Debug, Clone, PartialEq)]\npub struct S { f: u32 }\n";
     let out = reorder_source(input).unwrap();
-    assert!(out.starts_with("#!/usr/bin/env rustc\n"), "{out}");
+    let p_attr = out.find("#[derive(Debug, Clone, PartialEq)]").unwrap();
+    let p_struct = out.find("pub struct S").unwrap();
+    let p_fn = out.find("fn x").unwrap();
+    assert!(p_attr < p_struct, "{out}");
+    let between = &out[p_attr..p_struct];
+    assert!(
+        !between.contains("fn"),
+        "fn should not be between derive and struct: {between:?}"
+    );
+    assert!(p_struct < p_fn, "{out}");
 }
+

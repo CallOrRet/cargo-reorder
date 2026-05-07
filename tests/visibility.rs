@@ -7,12 +7,11 @@
 use cargo_reorder::reorder_source;
 
 #[test]
-fn pub_crate_struct_round_trips() {
-    let input = "fn z() {}\npub(crate) struct Internal { f: u32 }\n";
+fn pub_in_path_round_trips() {
+    let input = "fn z() {}\npub(in crate::shared) struct Restricted;\n";
     let out = reorder_source(input).unwrap();
-    assert!(out.contains("pub(crate) struct Internal"), "{out}");
     assert!(
-        out.find("pub(crate) struct").unwrap() < out.find("fn z").unwrap(),
+        out.contains("pub(in crate::shared) struct Restricted"),
         "{out}"
     );
 }
@@ -25,11 +24,12 @@ fn pub_super_fn_round_trips() {
 }
 
 #[test]
-fn pub_in_path_round_trips() {
-    let input = "fn z() {}\npub(in crate::shared) struct Restricted;\n";
+fn pub_crate_struct_round_trips() {
+    let input = "fn z() {}\npub(crate) struct Internal { f: u32 }\n";
     let out = reorder_source(input).unwrap();
+    assert!(out.contains("pub(crate) struct Internal"), "{out}");
     assert!(
-        out.contains("pub(in crate::shared) struct Restricted"),
+        out.find("pub(crate) struct").unwrap() < out.find("fn z").unwrap(),
         "{out}"
     );
 }

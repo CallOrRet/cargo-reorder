@@ -38,15 +38,23 @@ use syn::Item;
 /// the three buckets (the third is "tied" when pair counts are equal).
 #[derive(Debug, Default, Clone, Copy)]
 struct Counts {
-    mod_first: u32,
-    use_first: u32,
     mu_tied: u32,
-    pub_first: u32,
-    priv_first: u32,
+
     pp_tied: u32,
-    trait_first: u32,
-    struct_first: u32,
+
     ts_tied: u32,
+
+    mod_first: u32,
+
+    use_first: u32,
+
+    pub_first: u32,
+
+    priv_first: u32,
+
+    trait_first: u32,
+
+    struct_first: u32,
 }
 
 impl std::ops::AddAssign for Counts {
@@ -69,200 +77,16 @@ impl std::ops::AddAssign for Counts {
 #[derive(Default)]
 struct FileObs {
     mods: Vec<usize>,      // private + pub external mods
-    pub_mods: Vec<usize>,  // external `pub mod` only
-    priv_mods: Vec<usize>, // external private `mod` only
+
     uses: Vec<usize>,
-    traits: Vec<usize>,
+
     types: Vec<usize>, // struct / enum / union
-}
 
-fn is_test_mod(m: &syn::ItemMod) -> bool {
-    let name = m.ident.to_string();
-    if name == "tests" || name == "test" {
-        return true;
-    }
-    m.attrs.iter().any(|a| {
-        if !a.path().is_ident("cfg") {
-            return false;
-        }
-        let mut found = false;
-        let _ = a.parse_nested_meta(|meta| {
-            if meta.path.is_ident("test") {
-                found = true;
-            }
-            Ok(())
-        });
-        found
-    })
-}
+    traits: Vec<usize>,
 
-/// Observe one scope (a Vec<Item> belonging to either a File or an
-/// inline `mod foo { ... }`). Test mods are skipped — they neither
-/// contribute their own slot to the observation nor get recursed into.
-fn observe(items: &[Item]) -> FileObs {
-    let mut o = FileObs::default();
-    for (idx, item) in items.iter().enumerate() {
-        match item {
-            Item::Mod(m) => {
-                if is_test_mod(m) {
-                    continue;
-                }
-                // Only external `mod foo;` declarations count for the
-                // mod-vs-use and pub/priv-mod stats. Inline
-                // `mod foo { ... }` blocks are a different construct
-                // (their bodies are sampled as a fresh scope below).
-                if m.content.is_some() {
-                    continue;
-                }
-                o.mods.push(idx);
-                if matches!(m.vis, syn::Visibility::Inherited) {
-                    o.priv_mods.push(idx);
-                } else {
-                    o.pub_mods.push(idx);
-                }
-            }
-            Item::Use(_) => o.uses.push(idx),
-            Item::Trait(_) | Item::TraitAlias(_) => o.traits.push(idx),
-            Item::Struct(_) | Item::Enum(_) | Item::Union(_) => o.types.push(idx),
-            _ => {}
-        }
-    }
-    o
-}
+    pub_mods: Vec<usize>,  // external `pub mod` only
 
-/// Number of (a, b) pairs with a < b. O(|a|·|b|), fine for our scope sizes.
-fn count_lt(a: &[usize], b: &[usize]) -> u64 {
-    a.iter()
-        .map(|&ai| b.iter().filter(|&&bi| ai < bi).count() as u64)
-        .sum()
-}
-
-/// Recurse: count the current scope, then walk every inline (non-test)
-/// `mod` and treat its body as a fresh scope.
-fn sample_scope(items: &[Item], counts: &mut Counts, scopes: &mut u32) {
-    *counts += classify(&observe(items));
-    *scopes += 1;
-    for item in items {
-        if let Item::Mod(m) = item {
-            if is_test_mod(m) {
-                continue;
-            }
-            if let Some((_, inner)) = &m.content {
-                sample_scope(inner, counts, scopes);
-            }
-        }
-    }
-}
-
-fn classify(o: &FileObs) -> Counts {
-    let mut c = Counts::default();
-
-    if !o.mods.is_empty() && !o.uses.is_empty() {
-        let m_first = count_lt(&o.mods, &o.uses);
-        let u_first = count_lt(&o.uses, &o.mods);
-        match m_first.cmp(&u_first) {
-            std::cmp::Ordering::Greater => c.mod_first = 1,
-            std::cmp::Ordering::Less => c.use_first = 1,
-            std::cmp::Ordering::Equal => c.mu_tied = 1,
-        }
-    }
-
-    if !o.pub_mods.is_empty() && !o.priv_mods.is_empty() {
-        let p_first = count_lt(&o.pub_mods, &o.priv_mods);
-        let m_first = count_lt(&o.priv_mods, &o.pub_mods);
-        match p_first.cmp(&m_first) {
-            std::cmp::Ordering::Greater => c.pub_first = 1,
-            std::cmp::Ordering::Less => c.priv_first = 1,
-            std::cmp::Ordering::Equal => c.pp_tied = 1,
-        }
-    }
-
-    if !o.traits.is_empty() && !o.types.is_empty() {
-        let t_first = count_lt(&o.traits, &o.types);
-        let s_first = count_lt(&o.types, &o.traits);
-        match t_first.cmp(&s_first) {
-            std::cmp::Ordering::Greater => c.trait_first = 1,
-            std::cmp::Ordering::Less => c.struct_first = 1,
-            std::cmp::Ordering::Equal => c.ts_tied = 1,
-        }
-    }
-
-    c
-}
-
-fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        if path.is_dir() {
-            // Skip build artifacts, VCS folders, and the conventional
-            // non-library directories (`tests/` / `examples/` /
-            // `benches/`). The latter follow integration-style
-            // conventions — `mod common;` helpers, derive-UI fixtures,
-            // throw-away structs — that don't reflect how a project's
-            // library source organises items.
-            if matches!(
-                name.to_str(),
-                Some("target" | ".git" | "tests" | "examples" | "benches")
-            ) {
-                continue;
-            }
-            walk_rs(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn sample_project(name: &str, dir: &Path) -> Counts {
-    let mut files = Vec::new();
-    walk_rs(dir, &mut files);
-    let mut total = Counts::default();
-    let mut parse_skipped = 0u32;
-    let mut scopes = 0u32;
-    for f in &files {
-        let src = match fs::read_to_string(f) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let parsed = match syn::parse_file(&src) {
-            Ok(p) => p,
-            Err(_) => {
-                parse_skipped += 1;
-                continue;
-            }
-        };
-        sample_scope(&parsed.items, &mut total, &mut scopes);
-    }
-    let mu_total = total.mod_first + total.use_first + total.mu_tied;
-    let pp_total = total.pub_first + total.priv_first + total.pp_tied;
-    let ts_total = total.trait_first + total.struct_first + total.ts_tied;
-    eprintln!(
-        "  {:<14} files={:5} scopes={:5} parse-skipped={:3}  \
-         mod/use={}+{}+{}={}  pub/priv={}+{}+{}={}  \
-         trait/struct={}+{}+{}={}",
-        name,
-        files.len(),
-        scopes,
-        parse_skipped,
-        total.mod_first,
-        total.use_first,
-        total.mu_tied,
-        mu_total,
-        total.pub_first,
-        total.priv_first,
-        total.pp_tied,
-        pp_total,
-        total.trait_first,
-        total.struct_first,
-        total.ts_tied,
-        ts_total,
-    );
-    total
+    priv_mods: Vec<usize>, // external private `mod` only
 }
 
 fn main() {
@@ -361,6 +185,195 @@ fn main() {
         );
     }
     print_project_rollup("trait-first", p_trait, "struct-first", p_struct, p_ts_tied);
+}
+
+/// Observe one scope (a Vec<Item> belonging to either a File or an
+/// inline `mod foo { ... }`). Test mods are skipped — they neither
+/// contribute their own slot to the observation nor get recursed into.
+fn observe(items: &[Item]) -> FileObs {
+    let mut o = FileObs::default();
+    for (idx, item) in items.iter().enumerate() {
+        match item {
+            Item::Mod(m) => {
+                if is_test_mod(m) {
+                    continue;
+                }
+                // Only external `mod foo;` declarations count for the
+                // mod-vs-use and pub/priv-mod stats. Inline
+                // `mod foo { ... }` blocks are a different construct
+                // (their bodies are sampled as a fresh scope below).
+                if m.content.is_some() {
+                    continue;
+                }
+                o.mods.push(idx);
+                if matches!(m.vis, syn::Visibility::Inherited) {
+                    o.priv_mods.push(idx);
+                } else {
+                    o.pub_mods.push(idx);
+                }
+            }
+            Item::Use(_) => o.uses.push(idx),
+            Item::Trait(_) | Item::TraitAlias(_) => o.traits.push(idx),
+            Item::Struct(_) | Item::Enum(_) | Item::Union(_) => o.types.push(idx),
+            _ => {}
+        }
+    }
+    o
+}
+
+fn walk_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if path.is_dir() {
+            // Skip build artifacts, VCS folders, and the conventional
+            // non-library directories (`tests/` / `examples/` /
+            // `benches/`). The latter follow integration-style
+            // conventions — `mod common;` helpers, derive-UI fixtures,
+            // throw-away structs — that don't reflect how a project's
+            // library source organises items.
+            if matches!(
+                name.to_str(),
+                Some("target" | ".git" | "tests" | "examples" | "benches")
+            ) {
+                continue;
+            }
+            walk_rs(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Number of (a, b) pairs with a < b. O(|a|·|b|), fine for our scope sizes.
+fn count_lt(a: &[usize], b: &[usize]) -> u64 {
+    a.iter()
+        .map(|&ai| b.iter().filter(|&&bi| ai < bi).count() as u64)
+        .sum()
+}
+
+fn classify(o: &FileObs) -> Counts {
+    let mut c = Counts::default();
+
+    if !o.mods.is_empty() && !o.uses.is_empty() {
+        let m_first = count_lt(&o.mods, &o.uses);
+        let u_first = count_lt(&o.uses, &o.mods);
+        match m_first.cmp(&u_first) {
+            std::cmp::Ordering::Greater => c.mod_first = 1,
+            std::cmp::Ordering::Less => c.use_first = 1,
+            std::cmp::Ordering::Equal => c.mu_tied = 1,
+        }
+    }
+
+    if !o.pub_mods.is_empty() && !o.priv_mods.is_empty() {
+        let p_first = count_lt(&o.pub_mods, &o.priv_mods);
+        let m_first = count_lt(&o.priv_mods, &o.pub_mods);
+        match p_first.cmp(&m_first) {
+            std::cmp::Ordering::Greater => c.pub_first = 1,
+            std::cmp::Ordering::Less => c.priv_first = 1,
+            std::cmp::Ordering::Equal => c.pp_tied = 1,
+        }
+    }
+
+    if !o.traits.is_empty() && !o.types.is_empty() {
+        let t_first = count_lt(&o.traits, &o.types);
+        let s_first = count_lt(&o.types, &o.traits);
+        match t_first.cmp(&s_first) {
+            std::cmp::Ordering::Greater => c.trait_first = 1,
+            std::cmp::Ordering::Less => c.struct_first = 1,
+            std::cmp::Ordering::Equal => c.ts_tied = 1,
+        }
+    }
+
+    c
+}
+
+fn is_test_mod(m: &syn::ItemMod) -> bool {
+    let name = m.ident.to_string();
+    if name == "tests" || name == "test" {
+        return true;
+    }
+    m.attrs.iter().any(|a| {
+        if !a.path().is_ident("cfg") {
+            return false;
+        }
+        let mut found = false;
+        let _ = a.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
+}
+
+/// Recurse: count the current scope, then walk every inline (non-test)
+/// `mod` and treat its body as a fresh scope.
+fn sample_scope(items: &[Item], counts: &mut Counts, scopes: &mut u32) {
+    *counts += classify(&observe(items));
+    *scopes += 1;
+    for item in items {
+        if let Item::Mod(m) = item {
+            if is_test_mod(m) {
+                continue;
+            }
+            if let Some((_, inner)) = &m.content {
+                sample_scope(inner, counts, scopes);
+            }
+        }
+    }
+}
+
+fn sample_project(name: &str, dir: &Path) -> Counts {
+    let mut files = Vec::new();
+    walk_rs(dir, &mut files);
+    let mut total = Counts::default();
+    let mut parse_skipped = 0u32;
+    let mut scopes = 0u32;
+    for f in &files {
+        let src = match fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let parsed = match syn::parse_file(&src) {
+            Ok(p) => p,
+            Err(_) => {
+                parse_skipped += 1;
+                continue;
+            }
+        };
+        sample_scope(&parsed.items, &mut total, &mut scopes);
+    }
+    let mu_total = total.mod_first + total.use_first + total.mu_tied;
+    let pp_total = total.pub_first + total.priv_first + total.pp_tied;
+    let ts_total = total.trait_first + total.struct_first + total.ts_tied;
+    eprintln!(
+        "  {:<14} files={:5} scopes={:5} parse-skipped={:3}  \
+         mod/use={}+{}+{}={}  pub/priv={}+{}+{}={}  \
+         trait/struct={}+{}+{}={}",
+        name,
+        files.len(),
+        scopes,
+        parse_skipped,
+        total.mod_first,
+        total.use_first,
+        total.mu_tied,
+        mu_total,
+        total.pub_first,
+        total.priv_first,
+        total.pp_tied,
+        pp_total,
+        total.trait_first,
+        total.struct_first,
+        total.ts_tied,
+        ts_total,
+    );
+    total
 }
 
 fn print_project_rollup(label_a: &str, a: u32, label_b: &str, b: u32, tied: u32) {

@@ -20,17 +20,21 @@ use cargo_reorder::diagnostic::{
 use cargo_reorder::discover::{DiscoverOptions, discover};
 use cargo_reorder::{Config, reorder_source_with, reorder_source_with_path};
 
+enum Outcome {
+    Changed,
+
+    Unchanged,
+
+    ParseError,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum ColorChoice {
     Auto,
-    Always,
-    Never,
-}
 
-enum Outcome {
-    Changed,
-    Unchanged,
-    ParseError,
+    Never,
+
+    Always,
 }
 
 #[derive(Parser, Debug)]
@@ -70,84 +74,6 @@ struct Cli {
     #[arg(long, conflicts_with = "package")]
     all: bool,
 
-    /// Process only the named package(s) (matches `cargo fmt -p NAME`).
-    #[arg(short = 'p', long = "package", value_name = "NAME")]
-    package: Vec<String>,
-
-    /// Path to the `Cargo.toml` to use for metadata discovery.
-    #[arg(long, value_name = "PATH")]
-    manifest_path: Option<PathBuf>,
-
-    /// Do not force `#[cfg(test)] mod ...` to the end of the file.
-    #[arg(long)]
-    no_tests_last: bool,
-
-    /// Disable anchoring `impl` blocks to their target type.
-    #[arg(long)]
-    no_impl_grouping: bool,
-
-    /// Disable splitting `use` items into std / external / crate groups.
-    #[arg(long)]
-    no_import_groups: bool,
-
-    /// Disable putting `mod foo;` before `use ...;` (i.e., switch to
-    /// use-first). Default is mod-first because the pair-majority
-    /// sample of 21 real-world crates leans 12-vs-7 toward mod-first
-    /// (see README). Pass this flag if your project is on the
-    /// use-first side (notably `regex`, `ripgrep`, `cargo`, `chrono`,
-    /// `tracing`).
-    #[arg(long)]
-    no_mod_before_use: bool,
-
-    /// Disable reordering named fields inside `struct` / `union` /
-    /// `enum`. By default, fields are grouped by their first word
-    /// (snake_case `_` separator or PascalCase / camelCase boundary);
-    /// within each group sorted shortest-first; groups emitted in
-    /// ascending order of the group's mean name length with a blank
-    /// line between them. ABI- and semantics-affecting shapes are
-    /// always skipped (see README).
-    #[arg(long)]
-    no_reorder_fields: bool,
-
-    /// Disable the prefix-group + length sort applied inside `impl`
-    /// and `trait` bodies (covers `const` / `type` / `fn` / `async fn`
-    /// members). With this flag, every `impl` / `trait` body stays in
-    /// source order — useful when methods follow a deliberate sequence
-    /// (builder chain, lifecycle order, etc.). Field-level and
-    /// top-level grouping stay under `--no-reorder-fields`.
-    #[arg(long)]
-    no_reorder_impl_fns: bool,
-
-    /// Disable preserving `pub mod` / `mod` source order. With this
-    /// on, `pub mod` items are sorted before private `mod` items with
-    /// a blank line between the two groups. Default is to preserve
-    /// source order — empirically interleaved is the modal pattern
-    /// (11/19 projects in the README sample).
-    #[arg(long)]
-    no_preserve_mod_order: bool,
-
-    /// Skip recursing into inline `mod foo { ... }` blocks. By default
-    /// inline mod bodies are reordered with the same rules. Test mods
-    /// (`#[cfg(test)]`), `#[macro_use]` mods, and pure-`use` mods
-    /// (prelude / __private / sealed re-export shims) are always
-    /// skipped because their listing order is part of the contract.
-    #[arg(long)]
-    no_reorder_inline_mods: bool,
-
-    /// Disable putting `trait` ahead of `enum` / `struct` / `union`
-    /// (i.e., switch to struct-first). Default is trait-first — in
-    /// the 21-project sample 14/20 lean trait-first under
-    /// pair-majority. Pass this flag for projects that consistently
-    /// put structs / enums first.
-    #[arg(long)]
-    no_trait_before_struct: bool,
-
-    /// Disable ordering shorter trait paths first. By default,
-    /// `impl Debug for Foo` precedes `impl std::fmt::Debug for Foo`
-    /// when both target the same type and classify identically.
-    #[arg(long)]
-    no_short_trait_path_first: bool,
-
     /// Run `cargo fmt` (with the same `--all` / `-p` / `--manifest-path`
     /// args you passed here) *before* the reorder pass. Skipped under
     /// `--check` so a CI gate doesn't accidentally write to disk;
@@ -161,20 +87,89 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
-    /// Verbose: log every file rewritten (default mode is silent).
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Coloured diff and error output: `auto` (default — colour when
     /// stderr is a tty and `NO_COLOR` is unset), `always`, or `never`.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto, value_name = "WHEN")]
     color: ColorChoice,
+
+    /// Process only the named package(s) (matches `cargo fmt -p NAME`).
+    #[arg(short = 'p', long = "package", value_name = "NAME")]
+    package: Vec<String>,
+
+    /// Verbose: log every file rewritten (default mode is silent).
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Path to the `Cargo.toml` to use for metadata discovery.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
 
     /// Extra arguments after `--` are forwarded verbatim to `cargo fmt`
     /// (which in turn forwards them to `rustfmt`). Only meaningful with
     /// `--fmt`. Mirrors cargo fmt's own `cargo fmt -- <rustfmt_options>`.
     #[arg(last = true, value_name = "RUSTFMT_OPTIONS")]
     rustfmt_options: Vec<String>,
+
+    /// Do not force `#[cfg(test)] mod ...` to the end of the file.
+    #[arg(long)]
+    no_tests_last: bool,
+    /// Disable anchoring `impl` blocks to their target type.
+    #[arg(long)]
+    no_impl_grouping: bool,
+    /// Disable splitting `use` items into std / external / crate groups.
+    #[arg(long)]
+    no_import_groups: bool,
+    /// Disable putting `mod foo;` before `use ...;` (i.e., switch to
+    /// use-first). Default is mod-first because the pair-majority
+    /// sample of 21 real-world crates leans 12-vs-7 toward mod-first
+    /// (see README). Pass this flag if your project is on the
+    /// use-first side (notably `regex`, `ripgrep`, `cargo`, `chrono`,
+    /// `tracing`).
+    #[arg(long)]
+    no_mod_before_use: bool,
+    /// Disable reordering named fields inside `struct` / `union` /
+    /// `enum`. By default, fields are grouped by their first word
+    /// (snake_case `_` separator or PascalCase / camelCase boundary);
+    /// within each group sorted shortest-first; groups emitted in
+    /// ascending order of the group's mean name length with a blank
+    /// line between them. ABI- and semantics-affecting shapes are
+    /// always skipped (see README).
+    #[arg(long)]
+    no_reorder_fields: bool,
+    /// Disable the prefix-group + length sort applied inside `impl`
+    /// and `trait` bodies (covers `const` / `type` / `fn` / `async fn`
+    /// members). With this flag, every `impl` / `trait` body stays in
+    /// source order — useful when methods follow a deliberate sequence
+    /// (builder chain, lifecycle order, etc.). Field-level and
+    /// top-level grouping stay under `--no-reorder-fields`.
+    #[arg(long)]
+    no_reorder_impl_fns: bool,
+    /// Disable preserving `pub mod` / `mod` source order. With this
+    /// on, `pub mod` items are sorted before private `mod` items with
+    /// a blank line between the two groups. Default is to preserve
+    /// source order — empirically interleaved is the modal pattern
+    /// (11/19 projects in the README sample).
+    #[arg(long)]
+    no_preserve_mod_order: bool,
+    /// Skip recursing into inline `mod foo { ... }` blocks. By default
+    /// inline mod bodies are reordered with the same rules. Test mods
+    /// (`#[cfg(test)]`), `#[macro_use]` mods, and pure-`use` mods
+    /// (prelude / __private / sealed re-export shims) are always
+    /// skipped because their listing order is part of the contract.
+    #[arg(long)]
+    no_reorder_inline_mods: bool,
+    /// Disable putting `trait` ahead of `enum` / `struct` / `union`
+    /// (i.e., switch to struct-first). Default is trait-first — in
+    /// the 21-project sample 14/20 lean trait-first under
+    /// pair-majority. Pass this flag for projects that consistently
+    /// put structs / enums first.
+    #[arg(long)]
+    no_trait_before_struct: bool,
+    /// Disable ordering shorter trait paths first. By default,
+    /// `impl Debug for Foo` precedes `impl std::fmt::Debug for Foo`
+    /// when both target the same type and classify identically.
+    #[arg(long)]
+    no_short_trait_path_first: bool,
 }
 
 impl Cli {

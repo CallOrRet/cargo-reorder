@@ -32,6 +32,7 @@ impl TempDir {
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
+
     fn write(&self, rel: &str, src: &str) -> PathBuf {
         let p = self.dir.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -43,37 +44,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
-}
-
-/// Real-world shape: original parent file has the macro declared *before*
-/// the `mod foo;` (so it compiles via Rust's textual-scope inheritance).
-/// Naive category sort would push the macro to the end
-/// (Category::Macro weight 92) and the mod near the top (default
-/// weight 10), breaking the file. The macro-as-barrier rule pins the
-/// `macro_rules!` in its source position, which keeps the mod above
-/// it from sorting down past it — no child-file scan is needed.
-#[test]
-fn child_with_bare_macro_call_keeps_macro_above_mod() {
-    let td = TempDir::new("constrains");
-    td.write("src/paths.rs", "pub fn helper() {\n    t!(\"hi\");\n}\n");
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_macro < p_mod,
-        "macro_rules! t! must precede `mod paths;` because paths.rs invokes t!() bare:\n{out}"
-    );
 }
 
 /// `#[path = "..."]` overrides the conventional child-file lookup.
@@ -134,3 +104,34 @@ pub mod absent;
         "unreadable child must fall back to conservative — macro before mod:\n{out}"
     );
 }
+/// Real-world shape: original parent file has the macro declared *before*
+/// the `mod foo;` (so it compiles via Rust's textual-scope inheritance).
+/// Naive category sort would push the macro to the end
+/// (Category::Macro weight 92) and the mod near the top (default
+/// weight 10), breaking the file. The macro-as-barrier rule pins the
+/// `macro_rules!` in its source position, which keeps the mod above
+/// it from sorting down past it — no child-file scan is needed.
+#[test]
+fn child_with_bare_macro_call_keeps_macro_above_mod() {
+    let td = TempDir::new("constrains");
+    td.write("src/paths.rs", "pub fn helper() {\n    t!(\"hi\");\n}\n");
+    let lib = td.write(
+        "src/lib.rs",
+        r#"#[macro_export]
+macro_rules! t {
+    ($e:expr) => { let _ = $e; };
+}
+
+pub mod paths;
+"#,
+    );
+    let src = fs::read_to_string(&lib).unwrap();
+    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
+    let p_macro = out.find("macro_rules! t").unwrap();
+    let p_mod = out.find("pub mod paths").unwrap();
+    assert!(
+        p_macro < p_mod,
+        "macro_rules! t! must precede `mod paths;` because paths.rs invokes t!() bare:\n{out}"
+    );
+}
+

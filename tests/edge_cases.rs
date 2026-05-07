@@ -5,6 +5,19 @@
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 #[test]
+fn single_item_files() {
+    for src in [
+        "fn main() {}\n",
+        "use std::fmt;\n",
+        "struct S;\n",
+        "// just a comment\nfn x() {}\n",
+    ] {
+        let out = reorder_source(src).unwrap();
+        syn::parse_file(&out).unwrap();
+    }
+}
+
+#[test]
 fn empty_file_unchanged() {
     assert_eq!(reorder_source("").unwrap(), "");
     assert_eq!(reorder_source("\n").unwrap(), "\n");
@@ -40,30 +53,6 @@ fn unicode_identifiers_preserved() {
 }
 
 #[test]
-fn raw_strings_with_escapes_preserved() {
-    let input = "fn x() -> &'static str { r#\"hello \"world\"\"# }\nuse std::fmt;\n";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("r#\"hello \"world\"\"#"),
-        "raw string mangled:\n{out}"
-    );
-    syn::parse_file(&out).unwrap();
-}
-
-#[test]
-fn many_blank_lines_preserved_and_idempotent() {
-    let input = "fn a() {}\n\n\n\n\n\nuse std::fmt;\n";
-    let out = reorder_source(input).unwrap();
-    syn::parse_file(&out).unwrap();
-    let out2 = reorder_source(&out).unwrap();
-    assert_eq!(out, out2, "must be idempotent on whitespace-heavy input");
-    assert!(
-        out.find("use std::fmt").unwrap() < out.find("fn a").unwrap(),
-        "{out}"
-    );
-}
-
-#[test]
 fn windows_line_endings_round_trip() {
     let input = "fn z() {}\r\nuse std::fmt;\r\n";
     let out = reorder_source(input).unwrap();
@@ -75,6 +64,25 @@ fn windows_line_endings_round_trip() {
     );
 }
 
+#[test]
+fn raw_strings_with_escapes_preserved() {
+    let input = "fn x() -> &'static str { r#\"hello \"world\"\"# }\nuse std::fmt;\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains("r#\"hello \"world\"\"#"),
+        "raw string mangled:\n{out}"
+    );
+    syn::parse_file(&out).unwrap();
+}
+
+#[test]
+fn item_at_eof_without_trailing_newline() {
+    let input = "use std::fmt;\nfn z() {}";
+    let out = reorder_source(input).unwrap();
+    syn::parse_file(&out).unwrap();
+    // We always emit a trailing newline.
+    assert!(out.ends_with('\n'), "{out:?}");
+}
 #[test]
 fn item_with_inline_module_and_nested_items() {
     let input = "\
@@ -102,23 +110,15 @@ use std::fmt;
 }
 
 #[test]
-fn single_item_files() {
-    for src in [
-        "fn main() {}\n",
-        "use std::fmt;\n",
-        "struct S;\n",
-        "// just a comment\nfn x() {}\n",
-    ] {
-        let out = reorder_source(src).unwrap();
-        syn::parse_file(&out).unwrap();
-    }
-}
-
-#[test]
-fn item_at_eof_without_trailing_newline() {
-    let input = "use std::fmt;\nfn z() {}";
+fn many_blank_lines_preserved_and_idempotent() {
+    let input = "fn a() {}\n\n\n\n\n\nuse std::fmt;\n";
     let out = reorder_source(input).unwrap();
     syn::parse_file(&out).unwrap();
-    // We always emit a trailing newline.
-    assert!(out.ends_with('\n'), "{out:?}");
+    let out2 = reorder_source(&out).unwrap();
+    assert_eq!(out, out2, "must be idempotent on whitespace-heavy input");
+    assert!(
+        out.find("use std::fmt").unwrap() < out.find("fn a").unwrap(),
+        "{out}"
+    );
 }
+

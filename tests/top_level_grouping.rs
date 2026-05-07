@@ -14,25 +14,108 @@ fn opt_out() -> Config {
 }
 
 #[test]
-fn top_level_structs_regroup_by_prefix() {
+fn opt_out_preserves_top_level_source_order() {
     let input = "\
-struct cache_dir;
+fn user_login() {}
+fn cache_get() {}
+fn user_logout() {}
+";
+    let out = reorder_source_with(input, &opt_out()).unwrap();
+    let p_login = out.find("fn user_login").unwrap();
+    let p_get = out.find("fn cache_get").unwrap();
+    let p_logout = out.find("fn user_logout").unwrap();
+    assert!(p_login < p_get && p_get < p_logout, "{out}");
+}
+
+#[test]
+fn idempotent_after_one_pass() {
+    let input = "\
+fn user_logout() {}
+fn cache_set() {}
+fn user_login() {}
+fn cache_get() {}
 struct user;
-struct cache_size;
-struct user_id;
+struct cache;
+";
+    let p1 = reorder_source(input).unwrap();
+    let p2 = reorder_source(&p1).unwrap();
+    assert_eq!(p1, p2, "second pass must be a no-op:\n{p1}\n---\n{p2}");
+}
+#[test]
+fn structs_drag_their_impls_along() {
+    // After regrouping struct names by prefix/length, each struct's
+    // impl blocks must follow it (anchor-based grouping is preserved).
+    let input = "\
+struct cache_layer;
+struct user;
+impl user { fn get(&self) {} }
+impl cache_layer { fn evict(&self) {} }
 ";
     let out = reorder_source(input).unwrap();
-    // Group `user`: user (4), user_id (7) → mean 5.5
-    // Group `cache`: cache_dir (9), cache_size (10) → mean 9.5
-    // user group first (smaller mean).
     let p_user = out.find("struct user;").unwrap();
-    let p_uid = out.find("struct user_id").unwrap();
-    let p_cdir = out.find("struct cache_dir").unwrap();
-    let p_csize = out.find("struct cache_size").unwrap();
+    let p_imp_user = out.find("impl user").unwrap();
+    let p_cache = out.find("struct cache_layer;").unwrap();
+    let p_imp_cache = out.find("impl cache_layer").unwrap();
+    // user (mean 4) before cache_layer (mean 11).
+    // Each struct followed by its impl.
     assert!(
-        p_user < p_uid && p_uid < p_cdir && p_cdir < p_csize,
+        p_user < p_imp_user && p_imp_user < p_cache && p_cache < p_imp_cache,
         "{out}"
     );
+}
+
+#[test]
+fn cross_category_order_unchanged() {
+    // Top-level grouping only operates within a category. The
+    // category boundary (struct < fn etc.) still trumps.
+    let input = "\
+fn process_a() {}
+struct user;
+struct cache;
+fn process_b() {}
+";
+    let out = reorder_source(input).unwrap();
+    // Structs (51) before fns (90), regardless of grouping.
+    let p_user = out.find("struct user;").unwrap();
+    let p_cache = out.find("struct cache;").unwrap();
+    let p_pa = out.find("fn process_a").unwrap();
+    let p_pb = out.find("fn process_b").unwrap();
+    // user (4) before cache (5).
+    assert!(p_user < p_cache, "{out}");
+    // both structs before both fns.
+    assert!(p_cache < p_pa && p_cache < p_pb, "{out}");
+    // process_a, process_b same group + same length → source order.
+    assert!(p_pa < p_pb, "{out}");
+}
+
+#[test]
+fn fn_and_async_fn_are_separate_buckets() {
+    // Fn (90) and AsyncFn (91) are different categories; grouping
+    // happens within each independently.
+    let input = "\
+async fn user_fetch() {}
+fn cache_get() {}
+fn user_get() {}
+async fn cache_warm() {}
+";
+    let out = reorder_source(input).unwrap();
+    // All sync fns first (cat 90), then async fns (cat 91).
+    let p_cget = out.find("fn cache_get").unwrap();
+    let p_uget = out.find("fn user_get").unwrap();
+    let p_uf = out.find("async fn user_fetch").unwrap();
+    let p_cw = out.find("async fn cache_warm").unwrap();
+    // sync fns: cache (mean 9) before user (mean 8)? Let me recompute:
+    //   cache_get (9), user_get (8). Different prefixes. cache mean=9, user mean=8.
+    //   user before cache.
+    assert!(
+        p_uget < p_cget,
+        "user (mean 8) before cache (mean 9):\n{out}"
+    );
+    // async fns: user_fetch (10), cache_warm (10). Different prefixes,
+    //   both mean 10 → source order: user_fetch (was first) before cache_warm.
+    assert!(p_uf < p_cw, "{out}");
+    // Both syncs before both asyncs.
+    assert!(p_cget < p_uf && p_uget < p_cw, "{out}");
 }
 
 #[test]
@@ -53,6 +136,28 @@ fn cache_set() {}
     let p_ulogout = out.find("fn user_logout").unwrap();
     assert!(
         p_cget < p_cset && p_cset < p_ulogin && p_ulogin < p_ulogout,
+        "{out}"
+    );
+}
+
+#[test]
+fn top_level_structs_regroup_by_prefix() {
+    let input = "\
+struct cache_dir;
+struct user;
+struct cache_size;
+struct user_id;
+";
+    let out = reorder_source(input).unwrap();
+    // Group `user`: user (4), user_id (7) → mean 5.5
+    // Group `cache`: cache_dir (9), cache_size (10) → mean 9.5
+    // user group first (smaller mean).
+    let p_user = out.find("struct user;").unwrap();
+    let p_uid = out.find("struct user_id").unwrap();
+    let p_cdir = out.find("struct cache_dir").unwrap();
+    let p_csize = out.find("struct cache_size").unwrap();
+    assert!(
+        p_user < p_uid && p_uid < p_cdir && p_cdir < p_csize,
         "{out}"
     );
 }
@@ -122,108 +227,3 @@ trait RenderQueue {}
     assert!(p_rqueue < p_rengine, "{out}");
 }
 
-#[test]
-fn structs_drag_their_impls_along() {
-    // After regrouping struct names by prefix/length, each struct's
-    // impl blocks must follow it (anchor-based grouping is preserved).
-    let input = "\
-struct cache_layer;
-struct user;
-impl user { fn get(&self) {} }
-impl cache_layer { fn evict(&self) {} }
-";
-    let out = reorder_source(input).unwrap();
-    let p_user = out.find("struct user;").unwrap();
-    let p_imp_user = out.find("impl user").unwrap();
-    let p_cache = out.find("struct cache_layer;").unwrap();
-    let p_imp_cache = out.find("impl cache_layer").unwrap();
-    // user (mean 4) before cache_layer (mean 11).
-    // Each struct followed by its impl.
-    assert!(
-        p_user < p_imp_user && p_imp_user < p_cache && p_cache < p_imp_cache,
-        "{out}"
-    );
-}
-
-#[test]
-fn opt_out_preserves_top_level_source_order() {
-    let input = "\
-fn user_login() {}
-fn cache_get() {}
-fn user_logout() {}
-";
-    let out = reorder_source_with(input, &opt_out()).unwrap();
-    let p_login = out.find("fn user_login").unwrap();
-    let p_get = out.find("fn cache_get").unwrap();
-    let p_logout = out.find("fn user_logout").unwrap();
-    assert!(p_login < p_get && p_get < p_logout, "{out}");
-}
-
-#[test]
-fn cross_category_order_unchanged() {
-    // Top-level grouping only operates within a category. The
-    // category boundary (struct < fn etc.) still trumps.
-    let input = "\
-fn process_a() {}
-struct user;
-struct cache;
-fn process_b() {}
-";
-    let out = reorder_source(input).unwrap();
-    // Structs (51) before fns (90), regardless of grouping.
-    let p_user = out.find("struct user;").unwrap();
-    let p_cache = out.find("struct cache;").unwrap();
-    let p_pa = out.find("fn process_a").unwrap();
-    let p_pb = out.find("fn process_b").unwrap();
-    // user (4) before cache (5).
-    assert!(p_user < p_cache, "{out}");
-    // both structs before both fns.
-    assert!(p_cache < p_pa && p_cache < p_pb, "{out}");
-    // process_a, process_b same group + same length → source order.
-    assert!(p_pa < p_pb, "{out}");
-}
-
-#[test]
-fn fn_and_async_fn_are_separate_buckets() {
-    // Fn (90) and AsyncFn (91) are different categories; grouping
-    // happens within each independently.
-    let input = "\
-async fn user_fetch() {}
-fn cache_get() {}
-fn user_get() {}
-async fn cache_warm() {}
-";
-    let out = reorder_source(input).unwrap();
-    // All sync fns first (cat 90), then async fns (cat 91).
-    let p_cget = out.find("fn cache_get").unwrap();
-    let p_uget = out.find("fn user_get").unwrap();
-    let p_uf = out.find("async fn user_fetch").unwrap();
-    let p_cw = out.find("async fn cache_warm").unwrap();
-    // sync fns: cache (mean 9) before user (mean 8)? Let me recompute:
-    //   cache_get (9), user_get (8). Different prefixes. cache mean=9, user mean=8.
-    //   user before cache.
-    assert!(
-        p_uget < p_cget,
-        "user (mean 8) before cache (mean 9):\n{out}"
-    );
-    // async fns: user_fetch (10), cache_warm (10). Different prefixes,
-    //   both mean 10 → source order: user_fetch (was first) before cache_warm.
-    assert!(p_uf < p_cw, "{out}");
-    // Both syncs before both asyncs.
-    assert!(p_cget < p_uf && p_uget < p_cw, "{out}");
-}
-
-#[test]
-fn idempotent_after_one_pass() {
-    let input = "\
-fn user_logout() {}
-fn cache_set() {}
-fn user_login() {}
-fn cache_get() {}
-struct user;
-struct cache;
-";
-    let p1 = reorder_source(input).unwrap();
-    let p2 = reorder_source(&p1).unwrap();
-    assert_eq!(p1, p2, "second pass must be a no-op:\n{p1}\n---\n{p2}");
-}

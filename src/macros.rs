@@ -34,6 +34,14 @@
 
 use syn::Item;
 
+fn is_barrier(item: &Item) -> bool {
+    match item {
+        Item::Macro(_) => true,
+        Item::Mod(m) => has_macro_use_attr(&m.attrs),
+        _ => false,
+    }
+}
+
 /// Assign each item a non-decreasing segment number. Barrier items
 /// (see module docs) each get their own private odd segment;
 /// everything else stays on the surrounding even segment. Items in
@@ -53,14 +61,6 @@ pub(crate) fn compute_segments(items: &[Item]) -> Vec<u32> {
             }
         })
         .collect()
-}
-
-fn is_barrier(item: &Item) -> bool {
-    match item {
-        Item::Macro(_) => true,
-        Item::Mod(m) => has_macro_use_attr(&m.attrs),
-        _ => false,
-    }
 }
 
 fn has_macro_use_attr(attrs: &[syn::Attribute]) -> bool {

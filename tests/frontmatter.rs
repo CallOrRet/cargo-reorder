@@ -5,52 +5,6 @@
 use cargo_reorder::reorder_source;
 
 #[test]
-fn frontmatter_only_with_already_sorted_body() {
-    let src = "\
----
-[package]
-edition = \"2024\"
-[dependencies]
-serde = \"1\"
----
-
-use std::fmt;
-
-fn main() {}
-";
-    let out = reorder_source(src).unwrap();
-    assert_eq!(out, src, "must be a no-op:\n{out}");
-}
-
-#[test]
-fn body_is_reordered_frontmatter_is_preserved() {
-    let src = "\
----
-[package]
-edition = \"2024\"
----
-
-fn helper() {}
-use std::fmt;
-const X: u32 = 1;
-";
-    let out = reorder_source(src).unwrap();
-    // Frontmatter intact at the top.
-    assert!(
-        out.starts_with("---\n[package]\nedition = \"2024\"\n---\n"),
-        "{out}"
-    );
-    // Body reordered: use, const, fn.
-    let p_use = out.find("use std::fmt").unwrap();
-    let p_const = out.find("const X").unwrap();
-    let p_fn = out.find("fn helper").unwrap();
-    assert!(
-        p_use < p_const && p_const < p_fn,
-        "body not reordered:\n{out}"
-    );
-}
-
-#[test]
 fn shebang_then_frontmatter() {
     let src = "\
 #!/usr/bin/env -S cargo +nightly -Zscript
@@ -96,6 +50,58 @@ use std::fmt;
 }
 
 #[test]
+fn frontmatter_only_with_already_sorted_body() {
+    let src = "\
+---
+[package]
+edition = \"2024\"
+[dependencies]
+serde = \"1\"
+---
+
+use std::fmt;
+
+fn main() {}
+";
+    let out = reorder_source(src).unwrap();
+    assert_eq!(out, src, "must be a no-op:\n{out}");
+}
+
+#[test]
+fn no_frontmatter_means_normal_handling() {
+    let src = "fn main() {}\nuse std::fmt;\n";
+    let out = reorder_source(src).unwrap();
+    assert!(out.starts_with("use std::fmt"), "{out}");
+}
+#[test]
+fn body_is_reordered_frontmatter_is_preserved() {
+    let src = "\
+---
+[package]
+edition = \"2024\"
+---
+
+fn helper() {}
+use std::fmt;
+const X: u32 = 1;
+";
+    let out = reorder_source(src).unwrap();
+    // Frontmatter intact at the top.
+    assert!(
+        out.starts_with("---\n[package]\nedition = \"2024\"\n---\n"),
+        "{out}"
+    );
+    // Body reordered: use, const, fn.
+    let p_use = out.find("use std::fmt").unwrap();
+    let p_const = out.find("const X").unwrap();
+    let p_fn = out.find("fn helper").unwrap();
+    assert!(
+        p_use < p_const && p_const < p_fn,
+        "body not reordered:\n{out}"
+    );
+}
+
+#[test]
 fn unmatched_fence_is_left_for_syn_to_complain() {
     // Opener with 4 dashes, closer with 3 — not a valid frontmatter, the
     // splitter should bail out and `syn` will emit a parse error (which
@@ -115,9 +121,3 @@ fn main() {}
     );
 }
 
-#[test]
-fn no_frontmatter_means_normal_handling() {
-    let src = "fn main() {}\nuse std::fmt;\n";
-    let out = reorder_source(src).unwrap();
-    assert!(out.starts_with("use std::fmt"), "{out}");
-}

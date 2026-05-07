@@ -60,27 +60,6 @@ const PRELUDE_TRAITS: &[&str] = &[
     "IntoFuture",
 ];
 
-#[derive(Debug)]
-pub enum ReorderError {
-    Parse(syn::Error),
-}
-
-impl std::error::Error for ReorderError {}
-
-impl From<syn::Error> for ReorderError {
-    fn from(e: syn::Error) -> Self {
-        ReorderError::Parse(e)
-    }
-}
-
-impl fmt::Display for ReorderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReorderError::Parse(e) => write!(f, "failed to parse Rust source: {e}"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Category {
     ExternCrate,
@@ -110,40 +89,6 @@ pub(crate) enum Category {
 }
 
 impl Category {
-    fn classify(item: &Item) -> Self {
-        match item {
-            Item::ExternCrate(_) => Category::ExternCrate,
-            Item::Use(u) => match u.vis {
-                syn::Visibility::Inherited => Category::Use,
-                _ => Category::PubUse,
-            },
-            Item::Mod(m) => {
-                if has_cfg_test(&m.attrs) {
-                    Category::TestMod
-                } else {
-                    Category::Mod
-                }
-            }
-            Item::Const(_) => Category::Const,
-            Item::Static(_) => Category::Static,
-            Item::Type(_) => Category::TypeAlias,
-            Item::Enum(_) => Category::Enum,
-            Item::Struct(_) | Item::Union(_) => Category::Struct,
-            Item::Trait(_) | Item::TraitAlias(_) => Category::Trait,
-            Item::Impl(_) => Category::Impl,
-            Item::ForeignMod(_) => Category::ForeignMod,
-            Item::Fn(f) => {
-                if f.sig.asyncness.is_some() {
-                    Category::AsyncFn
-                } else {
-                    Category::Fn
-                }
-            }
-            Item::Macro(_) => Category::Macro,
-            _ => Category::Other,
-        }
-    }
-
     /// Sort weight. Default mod-first; `no_mod_before_use` flips to use-first.
     fn weight(self, cfg: &Config) -> u32 {
         let use_first = cfg.no_mod_before_use;
@@ -196,6 +141,40 @@ impl Category {
             Category::Fence => 0,
         }
     }
+
+    fn classify(item: &Item) -> Self {
+        match item {
+            Item::ExternCrate(_) => Category::ExternCrate,
+            Item::Use(u) => match u.vis {
+                syn::Visibility::Inherited => Category::Use,
+                _ => Category::PubUse,
+            },
+            Item::Mod(m) => {
+                if has_cfg_test(&m.attrs) {
+                    Category::TestMod
+                } else {
+                    Category::Mod
+                }
+            }
+            Item::Const(_) => Category::Const,
+            Item::Static(_) => Category::Static,
+            Item::Type(_) => Category::TypeAlias,
+            Item::Enum(_) => Category::Enum,
+            Item::Struct(_) | Item::Union(_) => Category::Struct,
+            Item::Trait(_) | Item::TraitAlias(_) => Category::Trait,
+            Item::Impl(_) => Category::Impl,
+            Item::ForeignMod(_) => Category::ForeignMod,
+            Item::Fn(f) => {
+                if f.sig.asyncness.is_some() {
+                    Category::AsyncFn
+                } else {
+                    Category::Fn
+                }
+            }
+            Item::Macro(_) => Category::Macro,
+            _ => Category::Other,
+        }
+    }
 }
 
 /// How an `impl` block is classified relative to a target type.
@@ -207,12 +186,55 @@ enum ImplKind {
     ExternalTrait = 3,
 }
 
+#[derive(Debug)]
+pub enum ReorderError {
+    Parse(syn::Error),
+}
+
+impl From<syn::Error> for ReorderError {
+    fn from(e: syn::Error) -> Self {
+        ReorderError::Parse(e)
+    }
+}
+
+impl std::error::Error for ReorderError {}
+
+impl fmt::Display for ReorderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReorderError::Parse(e) => write!(f, "failed to parse Rust source: {e}"),
+        }
+    }
+}
+
 /// Use-tree origin tag — used by both std-import and crate-import scans.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ImportOrigin {
-    Unknown,
     Std,
+
     Crate,
+
+    Unknown,
+}
+
+pub(crate) struct Block {
+    pub(crate) body: String,
+
+    pub(crate) leading: String,
+
+    pub(crate) category: Category,
+
+    pub(crate) trailing: String,
+
+    pub(crate) sort_key: SortKey,
+
+    /// Visibility for `mod` items, used by the blank-line logic when
+    /// `no_preserve_mod_order` is set (pub-mod-first grouping).
+    /// `Some(true)` = pub mod, `Some(false)` = private mod,
+    /// `None` = not a mod.
+    pub(crate) mod_is_pub: Option<bool>,
+
+    pub(crate) import_group: Option<ImportGroup>,
 }
 
 /// User-tunable behaviour. Every field defaults to `false`; opting *in*
@@ -221,32 +243,17 @@ enum ImportOrigin {
 /// indirection). See README for the rationale on each flag.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// Disable putting `mod foo;` before `use ...;`. Default is
-    /// mod-first — matches the majority pattern in our 21-project
-    /// sample (12/21 mod-first vs 7/21 use-first); see README.
-    pub no_mod_before_use: bool,
-    /// Disable preserving `pub mod` / `mod` source order. With this
-    /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
-    /// blank-line separator between them.
-    pub no_preserve_mod_order: bool,
-    /// Disable putting `trait` ahead of `enum` / `struct` / `union`.
-    /// Default is trait-first — matches the majority in our sample
-    /// (14/20 trait-first; see README).
-    pub no_trait_before_struct: bool,
+    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
+    pub no_tests_last: bool,
     /// Disable splitting imports into std / external / crate-local groups.
     pub no_import_groups: bool,
     /// Disable anchoring `impl` blocks to their target type
     /// (inherent → std trait → external trait).
     pub no_impl_grouping: bool,
-    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
-    pub no_tests_last: bool,
-    /// Disable recursing into inline `mod foo { ... }` blocks.
-    /// See README for the skip list (test mods, `#[macro_use]` mods,
-    /// pure-`use` mods) — those are always skipped regardless.
-    pub no_reorder_inline_mods: bool,
-    /// Disable ordering shorter trait paths first
-    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
-    pub no_short_trait_path_first: bool,
+    /// Disable putting `mod foo;` before `use ...;`. Default is
+    /// mod-first — matches the majority pattern in our 21-project
+    /// sample (12/21 mod-first vs 7/21 use-first); see README.
+    pub no_mod_before_use: bool,
     /// Disable reordering named fields inside `struct` / `union` /
     /// `enum` (and inside enum variants). When on, fields are grouped
     /// by their snake_case / PascalCase / camelCase first word, within
@@ -264,20 +271,21 @@ pub struct Config {
     /// Field-level and top-level grouping are unaffected — those stay
     /// under `no_reorder_fields`.
     pub no_reorder_impl_fns: bool,
-}
-
-pub(crate) struct Block {
-    pub(crate) category: Category,
-    pub(crate) import_group: Option<ImportGroup>,
-    /// Visibility for `mod` items, used by the blank-line logic when
-    /// `no_preserve_mod_order` is set (pub-mod-first grouping).
-    /// `Some(true)` = pub mod, `Some(false)` = private mod,
-    /// `None` = not a mod.
-    pub(crate) mod_is_pub: Option<bool>,
-    pub(crate) leading: String,
-    pub(crate) body: String,
-    pub(crate) trailing: String,
-    pub(crate) sort_key: SortKey,
+    /// Disable preserving `pub mod` / `mod` source order. With this
+    /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
+    /// blank-line separator between them.
+    pub no_preserve_mod_order: bool,
+    /// Disable putting `trait` ahead of `enum` / `struct` / `union`.
+    /// Default is trait-first — matches the majority in our sample
+    /// (14/20 trait-first; see README).
+    pub no_trait_before_struct: bool,
+    /// Disable recursing into inline `mod foo { ... }` blocks.
+    /// See README for the skip list (test mods, `#[macro_use]` mods,
+    /// pure-`use` mods) — those are always skipped regardless.
+    pub no_reorder_inline_mods: bool,
+    /// Disable ordering shorter trait paths first
+    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
+    pub no_short_trait_path_first: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -321,14 +329,18 @@ pub(crate) struct SortKey {
 /// anchoring, plus the three trait-classification name sets.
 struct ScopeIndex<'a> {
     name_index: &'a HashMap<String, (usize, Category)>,
-    std_imports: &'a HashSet<String>,
-    crate_imports: &'a HashSet<String>,
-    local_traits: &'a HashSet<String>,
+
     /// Per-item `(group_mean_proxy, name_len)` for items in
     /// group-eligible top-level categories
     /// (struct/union/enum/trait/fn/async-fn). Items not in the map
     /// fall back to `(0, 0)` and sort by source order.
     group_keys: &'a HashMap<usize, (u32, u32)>,
+
+    std_imports: &'a HashSet<String>,
+
+    local_traits: &'a HashSet<String>,
+
+    crate_imports: &'a HashSet<String>,
 }
 
 fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -347,85 +359,6 @@ fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-fn classify_trait_path(
-    path: &syn::Path,
-    std_imports: &HashSet<String>,
-    crate_imports: &HashSet<String>,
-    local_traits: &HashSet<String>,
-) -> ImplKind {
-    if let Some(first) = path.segments.first() {
-        match first.ident.to_string().as_str() {
-            "std" | "core" | "alloc" => return ImplKind::StdTrait,
-            "crate" | "self" | "super" => return ImplKind::CrateTrait,
-            _ => {}
-        }
-    }
-    if path.segments.len() == 1 {
-        let name = path.segments[0].ident.to_string();
-        if std_imports.contains(&name) || PRELUDE_TRAITS.contains(&name.as_str()) {
-            return ImplKind::StdTrait;
-        }
-        // Trait defined at the top of this same file (or imported from
-        // crate-local scope under that name) → crate-trait.
-        if crate_imports.contains(&name) || local_traits.contains(&name) {
-            return ImplKind::CrateTrait;
-        }
-    }
-    ImplKind::ExternalTrait
-}
-
-/// Walk a `use` tree, tagging each leaf by its origin (`std`/`core`/
-/// `alloc` → Std, `crate`/`self`/`super` → Crate). Renames record the
-/// new local name. Globs are ignored.
-fn collect_use_imports(
-    tree: &syn::UseTree,
-    origin: ImportOrigin,
-    std_out: &mut HashSet<String>,
-    crate_out: &mut HashSet<String>,
-) {
-    use syn::UseTree::*;
-    let push =
-        |o: ImportOrigin, name: String, std: &mut HashSet<String>, c: &mut HashSet<String>| match o
-        {
-            ImportOrigin::Std => {
-                std.insert(name);
-            }
-            ImportOrigin::Crate => {
-                c.insert(name);
-            }
-            ImportOrigin::Unknown => {}
-        };
-    match tree {
-        Path(p) => {
-            let next = match origin {
-                ImportOrigin::Unknown => match p.ident.to_string().as_str() {
-                    "std" | "core" | "alloc" => ImportOrigin::Std,
-                    "crate" | "self" | "super" => ImportOrigin::Crate,
-                    _ => ImportOrigin::Unknown,
-                },
-                _ => origin,
-            };
-            collect_use_imports(&p.tree, next, std_out, crate_out);
-        }
-        Name(n) => push(origin, n.ident.to_string(), std_out, crate_out),
-        Rename(r) => push(origin, r.rename.to_string(), std_out, crate_out),
-        Glob(_) => {}
-        Group(g) => {
-            for inner in &g.items {
-                collect_use_imports(inner, origin, std_out, crate_out);
-            }
-        }
-    }
-}
-
-/// Categories that participate in top-level same-category prefix-grouping.
-fn is_top_level_groupable(cat: Category) -> bool {
-    matches!(
-        cat,
-        Category::Struct | Category::Enum | Category::Trait | Category::Fn | Category::AsyncFn
-    )
-}
-
 /// Last segment of a `Type` path — the name an `impl` block targets.
 fn type_last_segment(ty: &syn::Type) -> Option<String> {
     match ty {
@@ -437,34 +370,17 @@ fn type_last_segment(ty: &syn::Type) -> Option<String> {
     }
 }
 
-/// Reorder with the default [`Config`].
-pub fn reorder_source(source: &str) -> Result<String, ReorderError> {
-    reorder_source_with_path(source, None, &Config::default())
-}
-
-pub fn reorder_source_with(source: &str, cfg: &Config) -> Result<String, ReorderError> {
-    reorder_source_with_path(source, None, cfg)
-}
-
-/// Reorder. `source_path` is accepted for API compatibility (and so a
-/// caller can identify the file in any future path-aware behaviour),
-/// but the current implementation does not consult it — every macro
-/// item is a barrier regardless of where the file lives.
-pub fn reorder_source_with_path(
-    source: &str,
-    _source_path: Option<&std::path::Path>,
-    cfg: &Config,
-) -> Result<String, ReorderError> {
-    reorder_inner(source, cfg)
-}
-
 /// Internal entry point. Recurses into itself for cargo-script
 /// frontmatter stripping and (when `!cfg.no_reorder_inline_mods` is on)
 /// for inline `mod foo { ... }` body recursion.
-fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
+fn reorder_inner(
+    source: &str,
+    cfg: &Config,
+    source_path: Option<&std::path::Path>,
+) -> Result<String, ReorderError> {
     // Cargo-script: strip frontmatter, reorder body, stitch back.
     if let Some((prefix, body)) = crate::frontmatter::split(source) {
-        let reordered = reorder_inner(&body, cfg)?;
+        let reordered = reorder_inner(&body, cfg, source_path)?;
         return Ok(format!("{prefix}{reordered}"));
     }
 
@@ -739,14 +655,166 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // Self-check: if the rewritten source no longer parses (a structural
     // bug like an impl-block boundary or a `/* ... */` block comment in
     // the gap between items got scrambled), fall back to the input
-    // rather than emit syntactically broken Rust. Caller-visible: the
-    // file is left untouched on this kind of edge case.
-    if assembled != source && syn::parse_file(&assembled).is_err() {
-        return Ok(source.to_string());
+    // rather than emit syntactically broken Rust. The file is left
+    // untouched and we surface a one-line warning to stderr so the
+    // event isn't silent under `--check`.
+    if assembled != source {
+        if let Err(e) = syn::parse_file(&assembled) {
+            let where_ = source_path
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<source>".to_string());
+            eprintln!(
+                "cargo-reorder: skipping {where_}: rewrite produced invalid Rust ({e}); file left unchanged"
+            );
+            return Ok(source.to_string());
+        }
     }
     Ok(assembled)
 }
 
+/// Reorder with the default [`Config`].
+pub fn reorder_source(source: &str) -> Result<String, ReorderError> {
+    reorder_source_with_path(source, None, &Config::default())
+}
+
+pub fn reorder_source_with(source: &str, cfg: &Config) -> Result<String, ReorderError> {
+    reorder_source_with_path(source, None, cfg)
+}
+
+/// Reorder. `source_path` is used only to name the file in the
+/// stderr warning emitted when the end-of-pipeline parse self-check
+/// trips and the rewrite is rolled back; nothing in the reorder
+/// algorithm itself depends on the path.
+pub fn reorder_source_with_path(
+    source: &str,
+    source_path: Option<&std::path::Path>,
+    cfg: &Config,
+) -> Result<String, ReorderError> {
+    reorder_inner(source, cfg, source_path)
+}
+
+fn classify_trait_path(
+    path: &syn::Path,
+    std_imports: &HashSet<String>,
+    crate_imports: &HashSet<String>,
+    local_traits: &HashSet<String>,
+) -> ImplKind {
+    if let Some(first) = path.segments.first() {
+        match first.ident.to_string().as_str() {
+            "std" | "core" | "alloc" => return ImplKind::StdTrait,
+            "crate" | "self" | "super" => return ImplKind::CrateTrait,
+            _ => {}
+        }
+    }
+    if path.segments.len() == 1 {
+        let name = path.segments[0].ident.to_string();
+        if std_imports.contains(&name) || PRELUDE_TRAITS.contains(&name.as_str()) {
+            return ImplKind::StdTrait;
+        }
+        // Trait defined at the top of this same file (or imported from
+        // crate-local scope under that name) → crate-trait.
+        if crate_imports.contains(&name) || local_traits.contains(&name) {
+            return ImplKind::CrateTrait;
+        }
+    }
+    ImplKind::ExternalTrait
+}
+
+/// Walk a `use` tree, tagging each leaf by its origin (`std`/`core`/
+/// `alloc` → Std, `crate`/`self`/`super` → Crate). Renames record the
+/// new local name. Globs are ignored.
+fn collect_use_imports(
+    tree: &syn::UseTree,
+    origin: ImportOrigin,
+    std_out: &mut HashSet<String>,
+    crate_out: &mut HashSet<String>,
+) {
+    use syn::UseTree::*;
+    let push =
+        |o: ImportOrigin, name: String, std: &mut HashSet<String>, c: &mut HashSet<String>| match o
+        {
+            ImportOrigin::Std => {
+                std.insert(name);
+            }
+            ImportOrigin::Crate => {
+                c.insert(name);
+            }
+            ImportOrigin::Unknown => {}
+        };
+    match tree {
+        Path(p) => {
+            let next = match origin {
+                ImportOrigin::Unknown => match p.ident.to_string().as_str() {
+                    "std" | "core" | "alloc" => ImportOrigin::Std,
+                    "crate" | "self" | "super" => ImportOrigin::Crate,
+                    _ => ImportOrigin::Unknown,
+                },
+                _ => origin,
+            };
+            collect_use_imports(&p.tree, next, std_out, crate_out);
+        }
+        Name(n) => push(origin, n.ident.to_string(), std_out, crate_out),
+        Rename(r) => push(origin, r.rename.to_string(), std_out, crate_out),
+        Glob(_) => {}
+        Group(g) => {
+            for inner in &g.items {
+                collect_use_imports(inner, origin, std_out, crate_out);
+            }
+        }
+    }
+}
+
+/// Recursively reorder bodies of every eligible inline `mod foo { ... }`
+/// at the current scope, returning a rewritten source string. Each
+/// recursive `reorder_inner` call handles its own nested inline mods,
+/// so we only walk one level here.
+/// Visit each top-level inline mod body and recursively reorder it.
+/// Takes the already-parsed `File` to avoid a redundant parse —
+/// `reorder_inner` will need its own `parsed` next anyway, and when
+/// no inline mod actually changes (the common case) we can hand that
+/// same AST back so the caller skips re-parsing entirely.
+///
+/// Returns `Ok(None)` when nothing changed; `Ok(Some(new_source))`
+/// when at least one inline mod body was rewritten.
+fn recurse_inline_mods(
+    source: &str,
+    parsed: &File,
+    cfg: &Config,
+) -> Result<Option<String>, ReorderError> {
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    for item in &parsed.items {
+        let Item::Mod(m) = item else { continue };
+        let Some((brace, items)) = &m.content else {
+            continue;
+        };
+        if should_skip_inline_recursion(m, items) {
+            continue;
+        }
+        // Body bytes lie strictly between `{` and `}`. byte_range() of
+        // the open brace ends at the byte just past `{`; byte_range() of
+        // the close brace starts at the byte of `}`.
+        let body_start = brace.span.open().byte_range().end;
+        let body_end = brace.span.close().byte_range().start;
+        if body_start > body_end || body_end > source.len() {
+            continue; // synthesised span we can't trust — leave alone
+        }
+        let body = &source[body_start..body_end];
+        let new_body = reorder_inner(body, cfg, None)?;
+        if new_body != body {
+            replacements.push((body_start, body_end, new_body));
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    // Apply in reverse byte order so earlier offsets stay valid.
+    replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
+    let mut out = source.to_string();
+    for (start, end, body) in replacements {
+        out.replace_range(start..end, &body);
+    }
+    Ok(Some(out))
+}
 #[allow(clippy::too_many_arguments)]
 fn compute_sort_key(
     item: &Item,
@@ -894,6 +962,14 @@ fn compute_header_end_line(parsed: &File) -> usize {
     max_line
 }
 
+/// Categories that participate in top-level same-category prefix-grouping.
+fn is_top_level_groupable(cat: Category) -> bool {
+    matches!(
+        cat,
+        Category::Struct | Category::Enum | Category::Trait | Category::Fn | Category::AsyncFn
+    )
+}
+
 /// Decide whether to recurse into an inline `mod foo { ... }` body.
 ///
 /// Skipped because reordering would change semantics or destroy
@@ -919,54 +995,3 @@ fn should_skip_inline_recursion(m: &syn::ItemMod, items: &[Item]) -> bool {
     false
 }
 
-/// Recursively reorder bodies of every eligible inline `mod foo { ... }`
-/// at the current scope, returning a rewritten source string. Each
-/// recursive `reorder_inner` call handles its own nested inline mods,
-/// so we only walk one level here.
-/// Visit each top-level inline mod body and recursively reorder it.
-/// Takes the already-parsed `File` to avoid a redundant parse —
-/// `reorder_inner` will need its own `parsed` next anyway, and when
-/// no inline mod actually changes (the common case) we can hand that
-/// same AST back so the caller skips re-parsing entirely.
-///
-/// Returns `Ok(None)` when nothing changed; `Ok(Some(new_source))`
-/// when at least one inline mod body was rewritten.
-fn recurse_inline_mods(
-    source: &str,
-    parsed: &File,
-    cfg: &Config,
-) -> Result<Option<String>, ReorderError> {
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-    for item in &parsed.items {
-        let Item::Mod(m) = item else { continue };
-        let Some((brace, items)) = &m.content else {
-            continue;
-        };
-        if should_skip_inline_recursion(m, items) {
-            continue;
-        }
-        // Body bytes lie strictly between `{` and `}`. byte_range() of
-        // the open brace ends at the byte just past `{`; byte_range() of
-        // the close brace starts at the byte of `}`.
-        let body_start = brace.span.open().byte_range().end;
-        let body_end = brace.span.close().byte_range().start;
-        if body_start > body_end || body_end > source.len() {
-            continue; // synthesised span we can't trust — leave alone
-        }
-        let body = &source[body_start..body_end];
-        let new_body = reorder_inner(body, cfg)?;
-        if new_body != body {
-            replacements.push((body_start, body_end, new_body));
-        }
-    }
-    if replacements.is_empty() {
-        return Ok(None);
-    }
-    // Apply in reverse byte order so earlier offsets stay valid.
-    replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
-    let mut out = source.to_string();
-    for (start, end, body) in replacements {
-        out.replace_range(start..end, &body);
-    }
-    Ok(Some(out))
-}

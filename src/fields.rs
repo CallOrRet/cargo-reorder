@@ -35,99 +35,68 @@ use syn::{
     ItemTrait, ItemUnion, TraitBoundModifier, TraitItem, TypeParamBound, WherePredicate,
 };
 
-/// Top-level entry point: given a parsed item and its raw source text,
-/// return a rewritten version with fields/variants reordered, or
-/// `None` if no rewrite was performed.
-pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -> Option<String> {
-    match item {
-        Item::Struct(s) => rewrite_struct(s, body_text, start_line),
-        Item::Union(u) => rewrite_union(u, body_text, start_line),
-        Item::Enum(e) => rewrite_enum(e, body_text, start_line),
-        Item::Impl(i) => rewrite_impl(i, body_text, start_line),
-        Item::Trait(t) => rewrite_trait(t, body_text, start_line),
-        _ => None,
-    }
+/// Sentinel bucket value that pins an entry to the very end of the
+/// reordered output. Used for fields/variants that must keep their
+/// trailing position for semantic reasons (DST layout for `?Sized`
+/// fields, `#[serde(other)]` on enum variants).
+const PIN_LAST: u8 = u8::MAX;
+
+#[derive(Clone)]
+struct SortableLines {
+    name: String,
+
+    /// Sub-bucket within the entry list. Items in lower buckets sort
+    /// before items in higher buckets, regardless of their group's
+    /// mean. Used by impl/trait body reordering to keep `async fn`
+    /// after sync `fn`. Field-level callers usually pass `0`; the
+    /// special value [`PIN_LAST`] pins the entry to the end.
+    bucket: u8,
+
+    last_line: usize,
+
+    first_line: usize,
 }
 
-fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<String> {
-    if container_skips(&s.attrs) {
-        return None;
+/// First "word" of an identifier — text up to the first `_` (snake_case)
+/// OR up to the first lowercase→uppercase boundary (camelCase/PascalCase).
+/// Ensures `foo_bar` → "foo", `FooBar` → "Foo", `fooBar` → "foo",
+/// while leaving `Foo`, `BAR`, `XMLParser` as a single word.
+pub(crate) fn prefix_of(name: &str) -> &str {
+    let mut prev_was_lower = false;
+    for (i, c) in name.char_indices() {
+        if c == '_' {
+            return &name[..i];
+        }
+        if c.is_uppercase() && prev_was_lower {
+            return &name[..i];
+        }
+        prev_was_lower = c.is_lowercase();
     }
-    let Fields::Named(named) = &s.fields else {
-        return None;
-    };
-    // DST layout: at most one unsized field, and it must be last. The
-    // user's source already has the unsized field last (it wouldn't
-    // compile otherwise), so pin the last named field in place and let
-    // the rest reorder normally.
-    let pin_last = has_unsized_generic(&s.generics);
-    rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
+    name
 }
 
-fn rewrite_union(u: &ItemUnion, body_text: &str, start_line: usize) -> Option<String> {
-    if container_skips(&u.attrs) {
-        return None;
+/// Split `text` into lines, each retaining its trailing `\n` if any.
+fn split_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let bytes = text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            out.push(text[start..=i].to_string());
+            start = i + 1;
+        }
     }
-    let pin_last = has_unsized_generic(&u.generics);
-    rewrite_named_fields_inplace(body_text, start_line, &u.fields, pin_last)
+    if start < text.len() {
+        out.push(text[start..].to_string());
+    }
+    out
 }
 
-fn rewrite_impl(item: &ItemImpl, body_text: &str, start_line: usize) -> Option<String> {
-    // Members get a `bucket` matching the top-level category order:
-    // const (0) → type (1) → fn (2) → async fn (3). Any macro /
-    // verbatim member is a hard barrier — its presence means we leave
-    // the body alone (we don't know its effects, can't safely cross).
-    if item
-        .items
-        .iter()
-        .any(|i| matches!(i, ImplItem::Macro(_) | ImplItem::Verbatim(_)))
-    {
-        return None;
-    }
-    sort_top_level(
-        body_text,
-        start_line,
-        item.items.iter().filter_map(|i| match i {
-            ImplItem::Const(c) => Some(member_entry(&c.attrs, &c.ident, c.span(), 0)),
-            ImplItem::Type(t) => Some(member_entry(&t.attrs, &t.ident, t.span(), 1)),
-            ImplItem::Fn(f) => Some(member_entry(
-                &f.attrs,
-                &f.sig.ident,
-                f.span(),
-                if f.sig.asyncness.is_some() { 3 } else { 2 },
-            )),
-            _ => None,
-        }),
-    )
-}
-
-fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option<String> {
-    // Same buckets as `rewrite_impl`. A trait body can carry
-    // `const` / `type` declarations and method signatures (with or
-    // without default bodies) — all sort by category, then by
-    // prefix-group + length within their bucket.
-    if item
-        .items
-        .iter()
-        .any(|i| matches!(i, TraitItem::Macro(_) | TraitItem::Verbatim(_)))
-    {
-        return None;
-    }
-    sort_top_level(
-        body_text,
-        start_line,
-        item.items.iter().filter_map(|i| match i {
-            TraitItem::Const(c) => Some(member_entry(&c.attrs, &c.ident, c.span(), 0)),
-            TraitItem::Type(t) => Some(member_entry(&t.attrs, &t.ident, t.span(), 1)),
-            TraitItem::Fn(f) => Some(member_entry(
-                &f.attrs,
-                &f.sig.ident,
-                f.span(),
-                if f.sig.asyncness.is_some() { 3 } else { 2 },
-            )),
-            _ => None,
-        }),
-    )
+fn lines_slice(text: &str, text_start_line: usize, line_lo: usize, line_hi: usize) -> String {
+    let lines = split_lines(text);
+    let lo = line_lo.saturating_sub(text_start_line);
+    let hi = line_hi.saturating_sub(text_start_line).min(lines.len() - 1);
+    lines[lo..=hi].concat()
 }
 
 fn member_entry(
@@ -146,107 +115,6 @@ fn member_entry(
         name: ident.to_string(),
         bucket,
     }
-}
-
-fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<String> {
-    if container_skips(&e.attrs) {
-        return None;
-    }
-    if e.variants.iter().any(|v| v.discriminant.is_some()) {
-        return None;
-    }
-    let mut out = body_text.to_string();
-
-    // Step 1: rewrite each struct-like variant's named-fields block
-    // from the back so earlier offsets stay valid.
-    let mut variant_rewrites: Vec<(usize, usize, String)> = Vec::new();
-    for v in &e.variants {
-        if let Fields::Named(named) = &v.fields {
-            // Compute the line range of this named-fields block in
-            // body_text. We need to slice it out, rewrite, splice back.
-            let line_range = field_block_line_range(&out, start_line, named);
-            if let Some((line_lo, line_hi)) = line_range {
-                let block_text = lines_slice(&out, start_line, line_lo, line_hi);
-                if let Some(rewritten) =
-                    rewrite_named_fields_inplace(&block_text, line_lo, named, false)
-                {
-                    let (lo_byte, hi_byte) =
-                        byte_range_for_line_range(&out, start_line, line_lo, line_hi);
-                    variant_rewrites.push((lo_byte, hi_byte, rewritten));
-                }
-            }
-        }
-    }
-    variant_rewrites.sort_by_key(|(lo, _, _)| std::cmp::Reverse(*lo));
-    for (lo, hi, replacement) in variant_rewrites {
-        out.replace_range(lo..hi, &replacement);
-    }
-
-    // Step 2: sort the variants themselves. Re-parse `out` to get
-    // fresh spans matching the post-rewrite text. Note: `syn::parse_str`
-    // restarts span line numbering at 1 within the parsed string, so
-    // the `text_start_line` we pass to `sort_top_level` must be `1`,
-    // *not* the original-source `start_line` we got from the caller —
-    // the entries' `first_line` / `last_line` are 1-indexed within
-    // `out`, not within the surrounding source file.
-    let parsed: ItemEnum = syn::parse_str(&out).ok()?;
-    // serde-derive forces `#[serde(other)]` to be on the last variant;
-    // pin that variant in place and reorder only its predecessors.
-    sort_top_level(
-        &out,
-        1,
-        parsed.variants.iter().map(|v| {
-            let name = v.ident.to_string();
-            let earliest_attr = v.attrs.first().map(|a| a.span());
-            let span = v.span();
-            let first_line = earliest_attr
-                .map(|s| s.start().line)
-                .unwrap_or_else(|| span.start().line);
-            let last_line = span.end().line;
-            SortableLines {
-                first_line,
-                last_line,
-                name,
-                bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
-            }
-        }),
-    )
-}
-
-/// Take a named-fields block (`{ a: u8, b: u16 }`) and rewrite the
-/// containing item's text with the fields reordered. When `pin_last`
-/// is true, the final field stays in place and only the prefix is
-/// reordered — used for DST layouts where the trailing field must
-/// remain last (`?Sized`, `[T]`, `str`, `dyn Trait`).
-fn rewrite_named_fields_inplace(
-    text: &str,
-    text_start_line: usize,
-    named: &FieldsNamed,
-    pin_last: bool,
-) -> Option<String> {
-    if named.named.len() < 2 {
-        return None;
-    }
-    let last_idx = named.named.len() - 1;
-    sort_top_level(
-        text,
-        text_start_line,
-        named.named.iter().enumerate().map(|(i, f)| {
-            let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-            let earliest_attr = f.attrs.first().map(|a| a.span());
-            let span = f.span();
-            let first_line = earliest_attr
-                .map(|s| s.start().line)
-                .unwrap_or_else(|| span.start().line);
-            let last_line = span.end().line;
-            SortableLines {
-                first_line,
-                last_line,
-                name,
-                bucket: if pin_last && i == last_idx { PIN_LAST } else { 0 },
-            }
-        }),
-    )
 }
 
 /// Generic line-based reordering. `text` is a chunk of source whose
@@ -332,16 +200,27 @@ where
     let mut header: String = lines[..first_field_line].concat();
     let footer: String = lines[last_field_line + 1..].concat();
 
-    // Group by (bucket, prefix). Each unique key becomes a group.
+    // Group by (bucket, prefix). HashMap<key, group_idx> picks the
+    // bucket in O(1); we keep a parallel Vec to preserve source-order
+    // first-appearance among groups. Per-group totals (bucket, sum,
+    // count) are tracked alongside so the cross-group sort below
+    // doesn't need to rescan members.
     let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut group_key_order: Vec<(u8, String)> = Vec::new();
+    let mut group_totals: Vec<(u8, usize, usize)> = Vec::new();
+    let mut by_key: std::collections::HashMap<(u8, String), usize> =
+        std::collections::HashMap::with_capacity(ranges.len());
     for (idx, (_, _, name, bucket)) in ranges.iter().enumerate() {
         let key = (*bucket, prefix_of(name).to_string());
-        if let Some(pos) = group_key_order.iter().position(|p| *p == key) {
-            groups[pos].push(idx);
+        let name_len = name.len();
+        if let Some(&gi) = by_key.get(&key) {
+            groups[gi].push(idx);
+            group_totals[gi].1 += name_len;
+            group_totals[gi].2 += 1;
         } else {
-            group_key_order.push(key);
+            let gi = groups.len();
+            by_key.insert(key, gi);
             groups.push(vec![idx]);
+            group_totals.push((*bucket, name_len, 1));
         }
     }
     // Within each group: stable-sort by name length ascending.
@@ -351,19 +230,18 @@ where
     // Between groups: bucket first (lower bucket sorts first —
     // implements "all sync `fn` before all `async fn`" inside impl /
     // trait bodies), then stable-sort by mean name length within the
-    // same bucket. Ties preserve source order — whichever group's
-    // first member appeared earliest wins. We avoid floats by
+    // same bucket. Ties preserve source order. We avoid floats by
     // comparing `sum_a * count_b` vs `sum_b * count_a`.
-    groups.sort_by(|a, b| {
-        let bucket_a = ranges[a[0]].3;
-        let bucket_b = ranges[b[0]].3;
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (bucket_a, sum_a, count_a) = group_totals[a];
+        let (bucket_b, sum_b, count_b) = group_totals[b];
         if bucket_a != bucket_b {
             return bucket_a.cmp(&bucket_b);
         }
-        let sum_a: usize = a.iter().map(|&i| ranges[i].2.len()).sum();
-        let sum_b: usize = b.iter().map(|&i| ranges[i].2.len()).sum();
-        (sum_a * b.len()).cmp(&(sum_b * a.len()))
+        (sum_a * count_b).cmp(&(sum_b * count_a))
     });
+    let groups: Vec<Vec<usize>> = order.into_iter().map(|i| std::mem::take(&mut groups[i])).collect();
 
     // Emit: each entry's slice (which already ends with \n), with a
     // blank line between groups.
@@ -395,41 +273,224 @@ where
     Some(format!("{header}{body}{footer}"))
 }
 
-/// Sentinel bucket value that pins an entry to the very end of the
-/// reordered output. Used for fields/variants that must keep their
-/// trailing position for semantic reasons (DST layout for `?Sized`
-/// fields, `#[serde(other)]` on enum variants).
-const PIN_LAST: u8 = u8::MAX;
-
-#[derive(Clone)]
-struct SortableLines {
-    first_line: usize,
-    last_line: usize,
-    name: String,
-    /// Sub-bucket within the entry list. Items in lower buckets sort
-    /// before items in higher buckets, regardless of their group's
-    /// mean. Used by impl/trait body reordering to keep `async fn`
-    /// after sync `fn`. Field-level callers usually pass `0`; the
-    /// special value [`PIN_LAST`] pins the entry to the end.
-    bucket: u8,
+/// Top-level entry point: given a parsed item and its raw source text,
+/// return a rewritten version with fields/variants reordered, or
+/// `None` if no rewrite was performed.
+pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -> Option<String> {
+    match item {
+        Item::Struct(s) => rewrite_struct(s, body_text, start_line),
+        Item::Union(u) => rewrite_union(u, body_text, start_line),
+        Item::Enum(e) => rewrite_enum(e, body_text, start_line),
+        Item::Impl(i) => rewrite_impl(i, body_text, start_line),
+        Item::Trait(t) => rewrite_trait(t, body_text, start_line),
+        _ => None,
+    }
 }
 
-/// First "word" of an identifier — text up to the first `_` (snake_case)
-/// OR up to the first lowercase→uppercase boundary (camelCase/PascalCase).
-/// Ensures `foo_bar` → "foo", `FooBar` → "Foo", `fooBar` → "foo",
-/// while leaving `Foo`, `BAR`, `XMLParser` as a single word.
-pub(crate) fn prefix_of(name: &str) -> &str {
-    let mut prev_was_lower = false;
-    for (i, c) in name.char_indices() {
-        if c == '_' {
-            return &name[..i];
+fn container_skips(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        if a.path().is_ident("repr") {
+            return true;
         }
-        if c.is_uppercase() && prev_was_lower {
-            return &name[..i];
+        if a.path().is_ident("derive") {
+            return derive_list_pins_order(a);
         }
-        prev_was_lower = c.is_lowercase();
+        if a.path().is_ident("cfg_attr") {
+            // `#[cfg_attr(<cfg>, derive(Ord, PartialOrd), ...)]`: a
+            // conditional derive can still pin field order under the
+            // matching cfg. We don't evaluate the cfg expression — if
+            // the attribute's token stream syntactically contains a
+            // `derive(...)` mentioning Ord / PartialOrd, skip
+            // reordering. Token-stream substring is safe here because
+            // both names are reserved trait identifiers; a field or
+            // value literally spelled `Ord` would still trigger a
+            // (harmless) skip.
+            return cfg_attr_pins_order(a);
+        }
+        false
+    })
+}
+
+fn rewrite_impl(item: &ItemImpl, body_text: &str, start_line: usize) -> Option<String> {
+    // Members get a `bucket` matching the top-level category order:
+    // const (0) → type (1) → fn (2) → async fn (3). Any macro /
+    // verbatim member is a hard barrier — its presence means we leave
+    // the body alone (we don't know its effects, can't safely cross).
+    if item
+        .items
+        .iter()
+        .any(|i| matches!(i, ImplItem::Macro(_) | ImplItem::Verbatim(_)))
+    {
+        return None;
     }
-    name
+    sort_top_level(
+        body_text,
+        start_line,
+        item.items.iter().filter_map(|i| match i {
+            ImplItem::Const(c) => Some(member_entry(&c.attrs, &c.ident, c.span(), 0)),
+            ImplItem::Type(t) => Some(member_entry(&t.attrs, &t.ident, t.span(), 1)),
+            ImplItem::Fn(f) => Some(member_entry(
+                &f.attrs,
+                &f.sig.ident,
+                f.span(),
+                if f.sig.asyncness.is_some() { 3 } else { 2 },
+            )),
+            _ => None,
+        }),
+    )
+}
+
+fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<String> {
+    if container_skips(&e.attrs) {
+        return None;
+    }
+    if e.variants.iter().any(|v| v.discriminant.is_some()) {
+        return None;
+    }
+    let mut out = body_text.to_string();
+
+    // Step 1: rewrite each struct-like variant's named-fields block
+    // from the back so earlier offsets stay valid.
+    let mut variant_rewrites: Vec<(usize, usize, String)> = Vec::new();
+    for v in &e.variants {
+        if let Fields::Named(named) = &v.fields {
+            // Compute the line range of this named-fields block in
+            // body_text. We need to slice it out, rewrite, splice back.
+            let line_range = field_block_line_range(&out, start_line, named);
+            if let Some((line_lo, line_hi)) = line_range {
+                let block_text = lines_slice(&out, start_line, line_lo, line_hi);
+                if let Some(rewritten) =
+                    rewrite_named_fields_inplace(&block_text, line_lo, named, false)
+                {
+                    let (lo_byte, hi_byte) =
+                        byte_range_for_line_range(&out, start_line, line_lo, line_hi);
+                    variant_rewrites.push((lo_byte, hi_byte, rewritten));
+                }
+            }
+        }
+    }
+    variant_rewrites.sort_by_key(|(lo, _, _)| std::cmp::Reverse(*lo));
+    for (lo, hi, replacement) in variant_rewrites {
+        out.replace_range(lo..hi, &replacement);
+    }
+
+    // Step 2: sort the variants themselves. Re-parse `out` to get
+    // fresh spans matching the post-rewrite text. Note: `syn::parse_str`
+    // restarts span line numbering at 1 within the parsed string, so
+    // the `text_start_line` we pass to `sort_top_level` must be `1`,
+    // *not* the original-source `start_line` we got from the caller —
+    // the entries' `first_line` / `last_line` are 1-indexed within
+    // `out`, not within the surrounding source file.
+    let parsed: ItemEnum = syn::parse_str(&out).ok()?;
+    // serde-derive forces `#[serde(other)]` to be on the last variant;
+    // pin that variant in place and reorder only its predecessors.
+    sort_top_level(
+        &out,
+        1,
+        parsed.variants.iter().map(|v| {
+            let name = v.ident.to_string();
+            let earliest_attr = v.attrs.first().map(|a| a.span());
+            let span = v.span();
+            let first_line = earliest_attr
+                .map(|s| s.start().line)
+                .unwrap_or_else(|| span.start().line);
+            let last_line = span.end().line;
+            SortableLines {
+                first_line,
+                last_line,
+                name,
+                bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
+            }
+        }),
+    )
+}
+
+fn rewrite_union(u: &ItemUnion, body_text: &str, start_line: usize) -> Option<String> {
+    if container_skips(&u.attrs) {
+        return None;
+    }
+    let pin_last = has_unsized_generic(&u.generics);
+    rewrite_named_fields_inplace(body_text, start_line, &u.fields, pin_last)
+}
+
+fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option<String> {
+    // Same buckets as `rewrite_impl`. A trait body can carry
+    // `const` / `type` declarations and method signatures (with or
+    // without default bodies) — all sort by category, then by
+    // prefix-group + length within their bucket.
+    if item
+        .items
+        .iter()
+        .any(|i| matches!(i, TraitItem::Macro(_) | TraitItem::Verbatim(_)))
+    {
+        return None;
+    }
+    sort_top_level(
+        body_text,
+        start_line,
+        item.items.iter().filter_map(|i| match i {
+            TraitItem::Const(c) => Some(member_entry(&c.attrs, &c.ident, c.span(), 0)),
+            TraitItem::Type(t) => Some(member_entry(&t.attrs, &t.ident, t.span(), 1)),
+            TraitItem::Fn(f) => Some(member_entry(
+                &f.attrs,
+                &f.sig.ident,
+                f.span(),
+                if f.sig.asyncness.is_some() { 3 } else { 2 },
+            )),
+            _ => None,
+        }),
+    )
+}
+
+fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<String> {
+    if container_skips(&s.attrs) {
+        return None;
+    }
+    let Fields::Named(named) = &s.fields else {
+        return None;
+    };
+    // DST layout: at most one unsized field, and it must be last. The
+    // user's source already has the unsized field last (it wouldn't
+    // compile otherwise), so pin the last named field in place and let
+    // the rest reorder normally.
+    let pin_last = has_unsized_generic(&s.generics);
+    rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
+}
+
+/// Take a named-fields block (`{ a: u8, b: u16 }`) and rewrite the
+/// containing item's text with the fields reordered. When `pin_last`
+/// is true, the final field stays in place and only the prefix is
+/// reordered — used for DST layouts where the trailing field must
+/// remain last (`?Sized`, `[T]`, `str`, `dyn Trait`).
+fn rewrite_named_fields_inplace(
+    text: &str,
+    text_start_line: usize,
+    named: &FieldsNamed,
+    pin_last: bool,
+) -> Option<String> {
+    if named.named.len() < 2 {
+        return None;
+    }
+    let last_idx = named.named.len() - 1;
+    sort_top_level(
+        text,
+        text_start_line,
+        named.named.iter().enumerate().map(|(i, f)| {
+            let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+            let earliest_attr = f.attrs.first().map(|a| a.span());
+            let span = f.span();
+            let first_line = earliest_attr
+                .map(|s| s.start().line)
+                .unwrap_or_else(|| span.start().line);
+            let last_line = span.end().line;
+            SortableLines {
+                first_line,
+                last_line,
+                name,
+                bucket: if pin_last && i == last_idx { PIN_LAST } else { 0 },
+            }
+        }),
+    )
 }
 
 /// Compute a per-item sort key `(group_mean_x_count, name_len)` for
@@ -477,72 +538,6 @@ where
         out.insert(idx, (mean_proxy, name.len() as u32));
     }
     out
-}
-
-/// Split `text` into lines, each retaining its trailing `\n` if any.
-fn split_lines(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let bytes = text.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'\n' {
-            out.push(text[start..=i].to_string());
-            start = i + 1;
-        }
-    }
-    if start < text.len() {
-        out.push(text[start..].to_string());
-    }
-    out
-}
-
-/// Find the line range (inclusive, 1-based source lines) that an
-/// inline named-fields block occupies in `text`, given the parsed
-/// `FieldsNamed` whose span coordinates refer to the original source.
-fn field_block_line_range(
-    text: &str,
-    text_start_line: usize,
-    named: &FieldsNamed,
-) -> Option<(usize, usize)> {
-    let span = named.span();
-    let lo = span.start().line;
-    let hi = span.end().line;
-    let total = split_lines(text).len();
-    let _lo_idx = lo.checked_sub(text_start_line)?;
-    let hi_idx = hi.checked_sub(text_start_line)?;
-    if hi_idx >= total {
-        return None;
-    }
-    Some((lo, hi))
-}
-
-fn lines_slice(text: &str, text_start_line: usize, line_lo: usize, line_hi: usize) -> String {
-    let lines = split_lines(text);
-    let lo = line_lo.saturating_sub(text_start_line);
-    let hi = line_hi.saturating_sub(text_start_line).min(lines.len() - 1);
-    lines[lo..=hi].concat()
-}
-
-fn byte_range_for_line_range(
-    text: &str,
-    text_start_line: usize,
-    line_lo: usize,
-    line_hi: usize,
-) -> (usize, usize) {
-    let lines = split_lines(text);
-    let lo_idx = line_lo.saturating_sub(text_start_line).min(lines.len());
-    let hi_idx = line_hi
-        .saturating_sub(text_start_line)
-        .min(lines.len().saturating_sub(1));
-    let mut byte = 0usize;
-    for l in &lines[..lo_idx] {
-        byte += l.len();
-    }
-    let mut end_byte = byte;
-    for l in &lines[lo_idx..=hi_idx] {
-        end_byte += l.len();
-    }
-    (byte, end_byte)
 }
 
 /// True if the container's generics carry a `?Sized` bound — either as a
@@ -596,21 +591,70 @@ fn variant_pinned_last(v: &syn::Variant) -> bool {
     })
 }
 
-fn container_skips(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        if a.path().is_ident("repr") {
-            return true;
-        }
-        if a.path().is_ident("derive") {
-            let mut found = false;
-            let _ = a.parse_nested_meta(|meta| {
-                if meta.path.is_ident("PartialOrd") || meta.path.is_ident("Ord") {
-                    found = true;
-                }
-                Ok(())
-            });
-            return found;
-        }
-        false
-    })
+fn cfg_attr_pins_order(attr: &Attribute) -> bool {
+    let Ok(list) = attr.meta.require_list() else {
+        return false;
+    };
+    let tokens = list.tokens.to_string();
+    if !tokens.contains("derive") {
+        return false;
+    }
+    // Whole-word match on Ord / PartialOrd to avoid matching identifiers
+    // that happen to contain "Ord" as a substring.
+    tokens
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|w| w == "Ord" || w == "PartialOrd")
 }
+/// Find the line range (inclusive, 1-based source lines) that an
+/// inline named-fields block occupies in `text`, given the parsed
+/// `FieldsNamed` whose span coordinates refer to the original source.
+fn field_block_line_range(
+    text: &str,
+    text_start_line: usize,
+    named: &FieldsNamed,
+) -> Option<(usize, usize)> {
+    let span = named.span();
+    let lo = span.start().line;
+    let hi = span.end().line;
+    let total = split_lines(text).len();
+    let _lo_idx = lo.checked_sub(text_start_line)?;
+    let hi_idx = hi.checked_sub(text_start_line)?;
+    if hi_idx >= total {
+        return None;
+    }
+    Some((lo, hi))
+}
+
+fn derive_list_pins_order(attr: &Attribute) -> bool {
+    let mut found = false;
+    let _ = attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("PartialOrd") || meta.path.is_ident("Ord") {
+            found = true;
+        }
+        Ok(())
+    });
+    found
+}
+
+fn byte_range_for_line_range(
+    text: &str,
+    text_start_line: usize,
+    line_lo: usize,
+    line_hi: usize,
+) -> (usize, usize) {
+    let lines = split_lines(text);
+    let lo_idx = line_lo.saturating_sub(text_start_line).min(lines.len());
+    let hi_idx = line_hi
+        .saturating_sub(text_start_line)
+        .min(lines.len().saturating_sub(1));
+    let mut byte = 0usize;
+    for l in &lines[..lo_idx] {
+        byte += l.len();
+    }
+    let mut end_byte = byte;
+    for l in &lines[lo_idx..=hi_idx] {
+        end_byte += l.len();
+    }
+    (byte, end_byte)
+}
+

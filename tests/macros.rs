@@ -32,6 +32,87 @@ fn after() {}
 }
 
 #[test]
+fn macro_use_mod_is_a_barrier() {
+    // `#[macro_use] mod foo;` exports macros from foo into the parent
+    // scope. Items declared after it (and child mods declared after
+    // it) may rely on those macros being visible. Pinning the
+    // `#[macro_use] mod` preserves that.
+    let input = "\
+mod alpha;
+
+#[macro_use]
+mod helpers;
+
+mod beta;
+";
+    let out = reorder_source(input).unwrap();
+    syn::parse_file(&out).unwrap();
+    let p_alpha = out.find("mod alpha").unwrap();
+    let p_helpers = out.find("mod helpers").unwrap();
+    let p_beta = out.find("mod beta").unwrap();
+    assert!(
+        p_alpha < p_helpers && p_helpers < p_beta,
+        "#[macro_use] mod must stay between its source neighbours:\n{out}"
+    );
+}
+
+#[test]
+fn plain_mod_is_not_a_barrier() {
+    // A non-macro_use `mod foo;` is a regular item — it sorts by
+    // category like everything else.
+    let input = "\
+fn z() {}
+mod inner;
+";
+    let out = reorder_source(input).unwrap();
+    syn::parse_file(&out).unwrap();
+    // Default order: `mod` (weight 10) before `fn` (weight 90).
+    let p_mod = out.find("mod inner").unwrap();
+    let p_fn = out.find("fn z").unwrap();
+    assert!(p_mod < p_fn, "plain mod must sort by category:\n{out}");
+}
+
+#[test]
+fn no_macros_means_normal_sort() {
+    let input = "fn b() {}\nconst A: u32 = 1;\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.find("const A").unwrap() < out.find("fn b").unwrap(),
+        "{out}"
+    );
+}
+#[test]
+fn many_macros_does_not_panic_or_loop() {
+    // Sanity: a file with several macros sprinkled between items
+    // doesn't break sorting or recursion. Each macro is its own
+    // segment; segments are sorted lexicographically by (segment,
+    // category) — which here is degenerate (1 item per segment) but
+    // must still terminate cleanly and be idempotent.
+    let input = "\
+fn a() {}
+macro_rules! m1 { () => {}; }
+fn b() {}
+macro_rules! m2 { () => {}; }
+fn c() {}
+macro_rules! m3 { () => {}; }
+fn d() {}
+";
+    let out = reorder_source(input).unwrap();
+    syn::parse_file(&out).unwrap();
+    let again = reorder_source(&out).unwrap();
+    assert_eq!(out, again, "idempotent");
+    // All four functions stay in source order.
+    let pa = out.find("fn a").unwrap();
+    let pb = out.find("fn b").unwrap();
+    let pc = out.find("fn c").unwrap();
+    let pd = out.find("fn d").unwrap();
+    assert!(
+        pa < pb && pb < pc && pc < pd,
+        "fn relative order preserved across barriers:\n{out}"
+    );
+}
+
+#[test]
 fn nothing_reorders_across_macro_rules() {
     // `const A` and `use std::fmt;` would normally sort before
     // `struct B` (use(31) < const(40) < struct(51) under the default
@@ -88,47 +169,6 @@ fn before() {}
 }
 
 #[test]
-fn macro_use_mod_is_a_barrier() {
-    // `#[macro_use] mod foo;` exports macros from foo into the parent
-    // scope. Items declared after it (and child mods declared after
-    // it) may rely on those macros being visible. Pinning the
-    // `#[macro_use] mod` preserves that.
-    let input = "\
-mod alpha;
-
-#[macro_use]
-mod helpers;
-
-mod beta;
-";
-    let out = reorder_source(input).unwrap();
-    syn::parse_file(&out).unwrap();
-    let p_alpha = out.find("mod alpha").unwrap();
-    let p_helpers = out.find("mod helpers").unwrap();
-    let p_beta = out.find("mod beta").unwrap();
-    assert!(
-        p_alpha < p_helpers && p_helpers < p_beta,
-        "#[macro_use] mod must stay between its source neighbours:\n{out}"
-    );
-}
-
-#[test]
-fn plain_mod_is_not_a_barrier() {
-    // A non-macro_use `mod foo;` is a regular item — it sorts by
-    // category like everything else.
-    let input = "\
-fn z() {}
-mod inner;
-";
-    let out = reorder_source(input).unwrap();
-    syn::parse_file(&out).unwrap();
-    // Default order: `mod` (weight 10) before `fn` (weight 90).
-    let p_mod = out.find("mod inner").unwrap();
-    let p_fn = out.find("fn z").unwrap();
-    assert!(p_mod < p_fn, "plain mod must sort by category:\n{out}");
-}
-
-#[test]
 fn cfg_gated_macros_each_pin_independently() {
     // Two `macro_rules! debug` definitions guarded by mutually-
     // exclusive cfg attrs. Each is a separate barrier; their
@@ -154,43 +194,3 @@ fn user() { debug!(); }
     );
 }
 
-#[test]
-fn many_macros_does_not_panic_or_loop() {
-    // Sanity: a file with several macros sprinkled between items
-    // doesn't break sorting or recursion. Each macro is its own
-    // segment; segments are sorted lexicographically by (segment,
-    // category) — which here is degenerate (1 item per segment) but
-    // must still terminate cleanly and be idempotent.
-    let input = "\
-fn a() {}
-macro_rules! m1 { () => {}; }
-fn b() {}
-macro_rules! m2 { () => {}; }
-fn c() {}
-macro_rules! m3 { () => {}; }
-fn d() {}
-";
-    let out = reorder_source(input).unwrap();
-    syn::parse_file(&out).unwrap();
-    let again = reorder_source(&out).unwrap();
-    assert_eq!(out, again, "idempotent");
-    // All four functions stay in source order.
-    let pa = out.find("fn a").unwrap();
-    let pb = out.find("fn b").unwrap();
-    let pc = out.find("fn c").unwrap();
-    let pd = out.find("fn d").unwrap();
-    assert!(
-        pa < pb && pb < pc && pc < pd,
-        "fn relative order preserved across barriers:\n{out}"
-    );
-}
-
-#[test]
-fn no_macros_means_normal_sort() {
-    let input = "fn b() {}\nconst A: u32 = 1;\n";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.find("const A").unwrap() < out.find("fn b").unwrap(),
-        "{out}"
-    );
-}
