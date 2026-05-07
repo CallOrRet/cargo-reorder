@@ -9,17 +9,17 @@
 ## 默认排序
 
 1. `extern crate` 声明
-2. `use` import —— 分三组，组间空一行：
+2. `mod` 声明 *（用 `--no-mod-before-use` 把 `use` 提到 `mod` 前面，见下文）*
+3. `use` import —— 分三组，组间空一行：
    - **std**：`std` / `core` / `alloc`
    - **external**：第三方 crate
    - **crate-local**：`crate` → `super` → `self` → local-mod
      （local-mod 指 `use foo::...` 的首段名字匹配本文件里的 `mod foo;`；这一组内部不再插空行）
-3. `pub use` re-export（同样的三组细分）
-4. `mod` 声明 *（可用 `--mod-before-use` 切换到「mod 在 use 之前」的少数派写法，见下文）*
+4. `pub use` re-export（同样的三组细分）
 5. `const`
 6. `static`
 7. 类型别名 `type X = ...`
-8. `trait` —— 紧跟那些目标类型不在本文件里的 `impl Trait for X`（`X` 不本地，所以 impl 锚定到 trait 而不是 type）。**（用 `--struct-before-trait` 与 #9 / #10 互换位置。）**
+8. `trait` —— 紧跟那些目标类型不在本文件里的 `impl Trait for X`（`X` 不本地，所以 impl 锚定到 trait 而不是 type）。**（用 `--no-trait-before-struct` 与 #9 / #10 互换位置。）**
 9. `enum` —— 紧跟它的 `impl` 块
 10. `struct` / `union` —— 紧跟它的 `impl` 块
 11. 无锚点 `impl` —— target 类型和 trait 都不在本文件 name_index 里（比如 `submod.rs` 实现的 impl，目标 type 定义在 `lib.rs`；不是 Rust 「孤儿」语义，是 parser 一次只看一个文件造成的）
@@ -60,8 +60,6 @@ mod tests {
 async fn fetch() {}
 
 fn helper() -> i32 { 1 }
-
-macro_rules! shout { ($e:expr) => { $e } }
 
 extern "C" {
     fn external();
@@ -115,6 +113,9 @@ extern crate alloc;
 
 extern crate alloc;
 
+mod helpers;
+pub mod public_api;
+
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -126,11 +127,6 @@ use helpers::Helper;
 pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
-
-macro_rules! shout { ($e:expr) => { $e } }
-
-mod helpers;
-pub mod public_api;
 
 const MAX: u32 = 100;
 
@@ -174,10 +170,11 @@ mod tests {
 要点：
 
 * `//! crate docs` 和 `#![allow(dead_code)]` 留在文件最顶部 —— 文件级的内容永远不会被打乱。
-* `extern crate alloc;` 排到最前面，和 `use` 块之间空一行。
+* `extern crate alloc;` 排到最前面，和后续之间空一行。
+* `mod` 声明紧跟其后（默认 mod 在前；加 `--no-mod-before-use` 翻转）。
 * `use` 拆成 std / external / crate-local 三个视觉组，组间空行。第三组内部按 `crate` → `super` → `self` → local-mod 的顺序；这里 `helpers` 因为有同文件里的 `mod helpers;` 声明，被识别为 local-mod。
 * `pub use` 同样按这套子分组，但单独成一块，紧跟在 `use` 之后。
-* `macro_rules! shout` 在这次输出里被拉到 `mod helpers;` / `mod public_api;` **之前**，**只是因为这个示例是单文件跑的** —— 工具试图打开 `helpers.rs` / `public_api.rs` 都失败（不存在），跨文件扫描走到了保守分支：「读不到的子文件，假设它可能 bare 调用本宏，于是把每个 `macro_rules!` 钉到后续 `mod foo;` 之前」。**真实 cargo 项目里子文件存在，工具会打开并扫描** —— 子文件确实有 bare `shout!()` 才约束，否则 `macro_rules! shout` 就落到默认 `Category::Macro` 位置（文件末尾附近）。
+* 这个示例里没有 `macro_rules!`。如果有,每个宏 item 都会作为 barrier(见下文「宏 item 是硬 barrier」),会把周围的排序切成独立的"barrier 之上 / barrier 之下"两段。
 * `struct Foo` 后面贴着它的三个 impl，顺序是 inherent (`impl Foo`) → std trait (`impl Display for Foo`) → 第三方 trait (`impl other_crate::Trait for Foo`)。
 * `trait Greet` 也带走了 `impl Greet for u32` —— 因为目标类型 `u32` 不在本文件，impl 锚定到 trait 而不是类型。
 * `#[cfg(test)] mod tests` 不论原文里在哪，最终都在文件末尾。
@@ -188,31 +185,35 @@ mod tests {
 
 ### 文件发现范围
 
+文件选择参数刻意收缩到 `cargo fmt` 的子集——同样的参数组合产出**同一份**文件清单。**不支持直接传文件或目录**（cargo fmt 也不支持），按 package 维度操作即可。
+
 | 参数 | 作用 |
 | --- | --- |
 | `--all` | 处理 workspace 里所有成员（对齐 `cargo fmt --all`） |
 | `-p`, `--package <NAME>` | 只处理指定的 package（对齐 `cargo fmt -p NAME`），可重复 |
-| `--manifest-path <PATH>` | 指定 `Cargo.toml` 的路径用于发现文件 |
-| `--exclude <substr>` | 路径包含该子串就跳过 |
+| `--manifest-path <PATH>` | 指定 `Cargo.toml` 的路径用于发现文件（对齐 `cargo fmt --manifest-path`） |
 
 ### Item 排序策略
 
 | 参数 | 作用 |
 | --- | --- |
-| `--pub-mod-first` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--pub-mod-first`」） |
-| `--mod-before-use` | `mod` 排在 `use` 之前（少数派写法，见「关于 `--mod-before-use`」） |
-| `--struct-before-trait` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--struct-before-trait`」） |
-| `--no-import-groups` | 不分 std / external / crate 三组 |
-| `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
 | `--no-tests-last` | 不强制 `#[cfg(test)] mod tests` 放最后 |
+| `--no-impl-grouping` | 不让 impl 跟随它的 type，所有 impl 一桶 |
+| `--no-import-groups` | 不分 std / external / crate 三组 |
+| `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
+| `--no-reorder-fields` | 不对 `struct` / `union` / `enum` 内部的具名字段做"前缀分组+长度排序"（默认开启，见「关于 `--no-reorder-fields`」） |
+| `--no-reorder-impl-fns` | 保留 `impl` / `trait` 块内成员（`const` / `type` / `fn` / `async fn`）的源序，字段级和顶层级排序仍然生效 |
+| `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
 | `--no-reorder-inline-mods` | 不重排 inline `mod foo { ... }` 的 body（见「关于 `--no-reorder-inline-mods`」） |
+| `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
+| `--no-short-trait-path-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
 
 ### 输出模式
 
 | 参数 | 作用 |
 | --- | --- |
+| `--fmt` | reorder 之前先跑一遍 `cargo fmt`（沿用同样的 `--all` / `-p` / `--manifest-path`）。`--check` 模式下自动跳过，避免 CI gate 写盘。 |
 | `--check` | CI 模式：有变化就退出码 1 |
-| `--stdout` | 写到 stdout 不修改文件 |
 | `-v`, `--verbose` | 打印每个被改写的文件名（默认是静默） |
 | `--color <auto\|always\|never>` | 给 `--check` 的 diff 上色（`-` 红、`+` 绿、头部青）和 parse error 上色。默认 `auto`：stderr 是 tty 且没有 `NO_COLOR` 环境变量时才上色。 |
 
@@ -228,10 +229,12 @@ cargo build --release --bin sample-stats
 # 单个项目：
 ./target/release/sample-stats ~/src/serde
 
-# 多个一起跑 —— 合计数据跨所有项目聚合：
+# 多个一起跑 —— 每个项目在合计里投一票：
 ./target/release/sample-stats \
-    ~/src/anyhow ~/src/serde ~/src/clap ~/src/regex \
-    ~/src/syn ~/src/ripgrep ~/src/tracing ~/src/tokio ~/src/cargo
+    ~/src/anyhow ~/src/axum ~/src/bat ~/src/bevy ~/src/cargo \
+    ~/src/chrono ~/src/clap ~/src/diesel ~/src/hyper ~/src/itertools \
+    ~/src/rayon ~/src/regex ~/src/reqwest ~/src/ripgrep ~/src/rust-analyzer \
+    ~/src/serde ~/src/syn ~/src/thiserror ~/src/tokio ~/src/tower ~/src/tracing
 ```
 
 每个项目的进度信息打到 **stderr**；三张 Markdown 表（mod-vs-use、pub/priv mod 分布、trait-vs-struct）打到 **stdout**，可以直接管道写进文档：
@@ -240,60 +243,140 @@ cargo build --release --bin sample-stats
 ./target/release/sample-stats ~/src/* > stats.md
 ```
 
-每个目录下所有 `.rs` 文件都用 `syn::parse_file` 解析（自动跳过 `target/` 和 `.git/`）。parse 失败的文件在 stderr 那行的 `parse-skipped` 里计数，不参与观察。**没有任何 flag** —— 所有观察规则（跳过 test mod、递归 inline mod、可见性识别）都写死在源码里。
+每个目录下所有 `.rs` 文件都用 `syn::parse_file` 解析。目录层面跳过：`target/`、`.git/`，以及惯例上的非库目录 `tests/`、`examples/`、`benches/` —— 它们走集成测试那套约定（`mod common;` 共享 helper、derive-UI 用的临时 struct、bench 一次性代码），并不反映项目库源码的真实组织风格。parse 失败的文件在 stderr 那行的 `parse-skipped` 里计数，不参与观察。**没有任何 flag** —— 所有观察规则（跳过 test mod、递归 inline mod、可见性识别）都写死在源码里。
 
-## 关于 `--pub-mod-first`
+## 关于 `--no-preserve-mod-order`
 
-统计同时含 `pub mod foo;` 和私有 `mod foo;` 声明的 scope（只看外部声明，不算 inline `mod foo { ... }` 块）—— 9 个项目共 64 个 scope：
+每个 scope 用 pair-majority 投票：把 (pub mod, priv mod) 所有配对枚举一遍，看是 pub 在前还是 priv 在前更多——21 个项目里有 19 个有合资格的 scope：
 
-| 项目 | pub-first | priv-first | interleaved |
+| 项目 | pub-first | priv-first | tied |
 | --- | --: | --: | --: |
-| ripgrep | 0 | 0 | 1 |
+| axum | 4 | 5 | 0 |
+| bat | 1 | 2 | 0 |
+| bevy | 25 | 21 | 1 |
+| cargo | 4 | 5 | 5 |
+| chrono | 1 | 1 | 1 |
+| clap | 2 | 5 | 0 |
+| diesel | 17 | 7 | 1 |
+| hyper | 2 | 1 | 0 |
+| itertools | 1 | 0 | 1 |
+| rayon | 2 | 0 | 0 |
+| regex | 6 | 1 | 1 |
+| reqwest | 3 | 0 | 1 |
+| ripgrep | 0 | 1 | 0 |
+| rust-analyzer | 14 | 13 | 1 |
 | serde | 4 | 2 | 0 |
-| syn | 1 | 0 | 1 |
-| clap | 1 | 4 | 2 |
-| regex | 2 | 1 | 5 |
-| tracing | 1 | 3 | 3 |
-| cargo | 2 | 2 | 10 |
-| tokio | 3 | 2 | 14 |
+| syn | 1 | 1 | 0 |
+| tokio | 8 | 9 | 2 |
+| tower | 7 | 3 | 0 |
+| tracing | 4 | 3 | 0 |
 
-合计：**22% pub-first，22% priv-first，56% interleaved**。默认保留源序 —— `pub mod` 和 `mod` 不按可见性重新洗牌。
+按项目聚合（每个项目按其内部多数投一票，平局单独计）：**10/19 pub-first (53%)，5/19 priv-first (26%)，4/19 tied (21%)**。略偏 pub-first。默认仍保留源序 —— 默认开启会让那些偏 priv-first 的项目（约 26%）和持平项目（约 21%）的输出无声变化。项目内部偏 pub-first 时再加 `--no-preserve-mod-order`。
 
-## 关于 `--mod-before-use`
+## 关于 `--no-mod-before-use`
 
-**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 9 个项目共 254 个：
+**没有官方规则规定 `mod` 一定要在 `use` 前面或后面**——rustfmt 也没立场。统计同时含外部 `mod foo;` 声明和 `use ...;` 的 scope（inline `mod foo { ... }` 块不计入"mod 声明"，它的 body 作为独立 scope 单独采样）—— 21 个项目共 618 个 scope。每个 scope 用 pair-majority 投票（数对 (mod, use) 中谁在前的多数胜出，平局算 tied）：
 
-| 项目 | use-first | mod-first |
-| --- | --: | --: |
-| ripgrep | 100% | 0% |
-| cargo | 100% | 0% |
-| regex | 96% | 4% |
-| tracing | 96% | 4% |
-| clap | 95% | 5% |
-| anyhow | 83% | 17% |
-| serde | 78% | 22% |
-| tokio | 42% | 58% |
-| syn | 15% | 85% |
+| 项目 | use-first | mod-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 0 | 1 | 0 |
+| axum | 8 | 11 | 2 |
+| bat | 3 | 2 | 0 |
+| bevy | 40 | 133 | 1 |
+| cargo | 28 | 13 | 1 |
+| chrono | 6 | 3 | 0 |
+| clap | 4 | 16 | 0 |
+| diesel | 16 | 33 | 2 |
+| hyper | 5 | 5 | 0 |
+| itertools | 1 | 1 | 0 |
+| rayon | 4 | 5 | 2 |
+| regex | 21 | 3 | 0 |
+| reqwest | 4 | 2 | 0 |
+| ripgrep | 11 | 1 | 0 |
+| rust-analyzer | 31 | 85 | 1 |
+| serde | 2 | 11 | 0 |
+| syn | 0 | 2 | 0 |
+| thiserror | 0 | 2 | 0 |
+| tokio | 9 | 39 | 0 |
+| tower | 2 | 22 | 1 |
+| tracing | 15 | 7 | 1 |
 
-合计：**76% use-first，24% mod-first**。默认 use-first；项目偏 mod-first 时（典型如 `syn`，大量 inline 子模块内部全是 mod-first；以及 `tokio` 在工作区层面整体偏 mod-first）加 `--mod-before-use`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**7/21 use-first (33%)，12/21 mod-first (57%)，2/21 tied (10%)**。**默认按多数走，mod 在前**。项目内部偏 use-first 时（典型如 `regex`、`ripgrep`、`cargo`、`chrono`、`tracing`、`rayon`、`reqwest`）加 `--no-mod-before-use`。
 
-## 关于 `--struct-before-trait`
+## 关于 `--no-trait-before-struct`
 
-统计同时含 `trait` 和 `struct` / `enum` / `union` 声明的 scope —— 9 个项目共 105 个：
+统计同时含 `trait` 和 `struct` / `enum` / `union` 声明的 scope —— 21 个项目里有 20 个有合资格的 scope。每个 scope 用 pair-majority 投票：
 
-| 项目 | trait-first | struct-first |
-| --- | --: | --: |
-| anyhow | 5 | 0 |
-| clap | 9 | 0 |
-| ripgrep | 4 | 0 |
-| syn | 7 | 0 |
-| cargo | 20 | 0 |
-| regex | 13 | 1 |
-| tracing | 17 | 2 |
-| serde | 4 | 4 |
-| tokio | 12 | 7 |
+| 项目 | trait-first | struct-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 1 | 2 | 1 |
+| axum | 7 | 2 | 2 |
+| bat | 2 | 1 | 0 |
+| bevy | 94 | 47 | 12 |
+| cargo | 11 | 7 | 0 |
+| chrono | 1 | 1 | 0 |
+| clap | 4 | 4 | 1 |
+| diesel | 27 | 34 | 8 |
+| hyper | 4 | 2 | 3 |
+| itertools | 7 | 3 | 2 |
+| rayon | 10 | 3 | 0 |
+| regex | 7 | 6 | 1 |
+| reqwest | 7 | 5 | 0 |
+| ripgrep | 2 | 2 | 0 |
+| rust-analyzer | 28 | 31 | 3 |
+| serde | 3 | 2 | 0 |
+| syn | 3 | 2 | 2 |
+| tokio | 11 | 4 | 2 |
+| tower | 10 | 2 | 0 |
+| tracing | 12 | 7 | 0 |
 
-合计：**87% trait-first，13% struct-first** —— 强烈 trait-first。大部分 crate 内部抽象用 `pub(crate) trait` 写在实现它的 struct **之前**。默认 trait-first；项目逆这个潮流时再加 `--struct-before-trait`。
+按项目聚合（每个项目按内部多数投一票，平局单独计）：**14/20 trait-first (70%)，3/20 struct-first (15%)，3/20 tied (15%)**。强烈 trait-first。默认 trait-first；项目逆这个潮流时再加 `--no-trait-before-struct`。
+
+## 关于 `--no-reorder-fields`
+
+默认情况下 cargo-reorder 在**三个层面**用同一套分组规则：
+
+- **字段级**：每个 `struct` / `union` 的具名字段、每个 `enum` 的变体、以及 struct-like 变体内部的具名字段
+- **顶层（同类内部）**：连续的顶层 `struct` / `union` / `enum` / `trait` / `fn` / `async fn` 之间，同类 item 按同样的"前缀分组 + 长度"规则重排。`impl` 块跟随它锚定的类型一起移动，所以 `struct Foo` + `impl Foo` 始终连在一起
+- **`impl` / `trait` 块内部**：成员按与顶层一致的分类顺序排——`const` → `type` → `fn` → `async fn`，每一类内部再用前缀分组 + 长度规则。宏 / verbatim 成员是硬屏障，整个 body 保持源序
+
+三个层面共用的规则：
+
+1. **按"首词"分组**：
+   - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
+   - PascalCase / camelCase：取第一个小写→大写的转折之前（`FooBar` → `Foo`，`fooBar` → `foo`）
+   - 没有 `_` 也没有大小写转折的（`Foo`、`BAR`、`XMLParser`）自成一组
+2. **组内**按名字长度升序，短的在前（`bar_x` 在 `bar_long_name` 之前），同长度按原顺序
+3. **组间**按**该组的平均名字长度**升序（所有成员名字长度的算数平均），同长度按原顺序
+4. 不同组之间插入**一个空行**，组内字段紧贴
+
+示例（左为输入，右为输出）：
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+加 `--no-reorder-fields` 同时关掉三层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部保持原样，每个 `impl` / `trait` body 也保持原样。如果只想保留 `impl` / `trait` body 的源序、其他两层照常排（比如方法是 builder 链、有特定调用顺序），用更精准的 `--no-reorder-impl-fns`。
+
+字段级 pass 会自动**跳过**那些重排会改 ABI / 内存布局 / 派生语义的形态：
+
+| 模式 | 跳过原因 |
+| --- | --- |
+| 任何 `#[repr(...)]`（C、packed、transparent、align(N)、整型 repr） | 重排会改 ABI / 内存布局 |
+| `#[derive(Ord)]` 或 `#[derive(PartialOrd)]` | 派生比较按字段/变体声明顺序读 |
+| `enum` 任一变体带显式 discriminant（`A = 1`） | 重排会无声修改其它变体的隐式值 |
+| 元组 struct / 元组变体 / 单元 struct / 单元变体 | 没有字段名可分组 |
+| 单行布局（`struct S { a: u8, b: u8 }`） | 行级切片无法干净地分离它们，保持原样 |
+| 字段数 < 2 | 没东西可排 |
+
+这些跳过规则故意写得保守，目标是"默认开启字段重排始终是安全的"。如果你的代码里发现还有该跳过的场景，请提 issue。
 
 ## 关于 `--no-reorder-inline-mods`
 
@@ -303,13 +386,13 @@ cargo build --release --bin sample-stats
 
 | 模式 | 跳过原因 |
 | --- | --- |
-| `#[cfg(test)] mod ...` / `mod tests { ... }` | 已被 `--tests-last` 拉到文件末尾；测试夹具的顺序往往是叙事性的，重排会掩盖意图 |
+| `#[cfg(test)] mod ...` / `mod tests { ... }` | 默认就被 tests-last 规则拉到文件末尾(用 `--no-tests-last` 可关闭)；测试夹具的顺序往往是叙事性的，重排会掩盖意图 |
 | `#[macro_use] mod ...` | 里面定义的 `macro_rules!` 会泄露到父作用域，body 内重排会改变可见性顺序 |
 | 纯 `use` mod（所有 item 都是 `use ...`） | 覆盖 `prelude`、`__private`、sealed-trait re-export 等场景 —— 这种顺序就是公共 API 的一部分 |
 
-只要 body 里**有一个非-`use` 的 item**，这个 mod 就是合格目标。递归进 inline body 时跨文件宏调用扫描是**精确**的：父文件路径已知时，递归会按 inline mod 的子目录（默认 `<父目录>/<mod 名>/`，或者从 `#[path = "..."]` 推出来的目录）解析 body 内 `mod bar;` 声明指向的子文件。也就是说 inline mod 内定义的 `macro_rules!`，只会被那些**真的 bare 调用了它**的 `mod bar;` 子文件约束位置 —— 和文件顶层是一样的精度保证。
+只要 body 里**有一个非-`use` 的 item**,这个 mod 就是合格目标。inline mod body 内的 `macro_rules!` 同样作为 barrier 处理 —— 在 body 内部钉位,body 内任何其他 item 都不能跨过它。
 
-默认关，因为 `prelude` 风格 mod 和 codegen 脚手架在生态里很常见，意外重排它们的代价比"常规 inline mod 重排"的收益大。建议先在代表性文件上看完 diff 再全项目开。
+默认开启 inline mod 递归。`prelude` 风格 mod 和 codegen 脚手架在生态里很常见,这些场景里的 body 顺序往往是 API 契约的一部分 —— 上面表格里的几类(`#[cfg(test)] mod`、`#[macro_use] mod`、纯 `use` mod)会被自动跳过 body 重排,对其他 inline mod 才递归。如果某个项目里还想完全关掉 inline mod 递归,加 `--no-reorder-inline-mods` 即可。
 
 ## 注释和属性
 
@@ -393,8 +476,8 @@ cargo reorder --all
 | `tests/items.rs` | 16 种顶层 item 各自归到正确分类 |
 | `tests/imports.rs` | `extern crate` / `use` / `pub use` 分组和别名 |
 | `tests/impls.rs` | impl 锚定 + inherent → std → crate → external 四档排序 |
-| `tests/macros.rs` | `macro_rules!` 放置、链式、barrier、cfg 多重定义 |
-| `tests/cross_file.rs` | 扫描子文件检查 bare 使用本地宏 |
+| `tests/macros.rs` | 宏 item 作为 barrier 的语义:钉位、段隔离、idempotent |
+| `tests/cross_file.rs` | `mod foo;` 文件查找、`#[path]` 重定向、子文件缺失 fallback |
 | `tests/comments.rs` | leading 注释、内部 doc、文件头注释块 |
 | `tests/attributes.rs` | `#[derive]` / `#[cfg]` / `#[cfg_attr]` / 多行属性 |
 | `tests/generics.rs` | 生命周期、where 子句、const 泛型、GAT、HRTB、async trait |
@@ -407,7 +490,12 @@ cargo reorder --all
 
 ### 验证过程中发现的注意点
 
-* **`macro_rules!` 是文本作用域。** `macro_rules! foo` 的可见范围只覆盖它定义之后的代码（在同文件内，以及子模块当 `mod foo;` 声明位于宏定义之后时）。所以工具：（a）把所有顶层裸宏调用（`Item::Macro` 且 `ident = None`，如 `lazy_static! { ... }`）当成屏障，不跨过它移动其他 item；（b）在排序后做一遍后处理，把每个 `macro_rules!` 定义拉到它在本文件第一次被调用之前，并放到所有源码里跟在它之后的 `mod foo;` 声明之前。
+* **宏 item 是硬 barrier。** `macro_rules!` 是文本作用域,且调用点形态多(struct 字段初始化、类型注解、深埋在 sibling 文件里通过 `#[macro_use] mod` 漏出来 …)。与其每种形态都试图正确识别 caller,工具直接把所有宏相关的顶层 item 钉在源码位置,**禁止任何其他 item 跨越**。barrier 集合:
+  - `macro_rules! foo`(无论有没有 ident)—— 钉自己
+  - `lazy_static! { ... }` / `to_hash_map!(...)` 这类裸顶层宏调用 —— 钉自己
+  - `#[macro_use] mod foo;` —— 钉自己,因为它从这一行开始把 child 的 `macro_rules!` 漏到父 scope
+
+  代价:含多个宏的文件会被切成多个独立排序段,有时排得没那么彻底。换来的是规则极其简单、永远不会产生编译不过的输出。
 * **支持 RFC 3502 cargo-script 文件。** 开头带 `---` ... `---` TOML frontmatter 的单文件脚本（前面可以有 shebang）会被识别：frontmatter 原样保留，只重排 Rust 主体部分。`---` 裸开头和 `---cargo` 带 info string 两种形式都支持。
 * **构建文件 parse 错误严格、非构建文件静默跳过。** 对齐 `cargo fmt`：从 cargo target 的 `src_path` 沿 mod 树能走到的文件（也就是项目真的会编译的文件）按严格处理 —— parse 错误会打印 rustc 风格诊断并以非零状态码退出。**不在**构建树里的文件（典型如 cargo 自己的 `tests/testsuite/script/rustc_fixtures/`、rustfix 的 `tests/everything/`，以及其他扩展名是 `.rs` 但不参与编译的测试夹具）parse 失败时静默跳过。这个判断用的是和默认发现模式同一份 `cargo metadata` 输出，所以无论是 `cargo-reorder` 不带参数、加 `--all`、还是给显式路径，都能正确分类。
 

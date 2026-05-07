@@ -1,6 +1,7 @@
 [package]
 authors      = ["CallOrRet <callorret@icloud.com>"]
 categories   = ["command-line-utilities", "development-tools::cargo-plugins"]
+default-run  = "cargo-reorder"
 description  = "Reorder top-level items in Rust source files following community style"
 edition      = "2024"
 exclude      = ["rust-toolchain.toml"]
@@ -10,7 +11,7 @@ name         = "cargo-reorder"
 readme       = "README.md"
 repository   = "https://github.com/CallOrRet/cargo-reorder"
 rust-version = "1.85"
-version      = "0.1.2"
+version      = "0.2.0"
 
 [[bin]]
 name = "cargo-reorder"
@@ -47,7 +48,6 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 serde_json  = { version = "1" }
 similar     = { version = "3" }
 syn         = { version = "2", features = ["full", "extra-traits", "parsing", "printing", "visit"] }
-walkdir     = { version = "2" }
 
 [dev-dependencies]
 criterion         = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

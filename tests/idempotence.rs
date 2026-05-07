@@ -14,6 +14,33 @@ fn assert_roundtrip(input: &str) {
 }
 
 #[test]
+fn macro_rules_roundtrip() {
+    assert_roundtrip(
+        r#"
+fn x() {}
+
+macro_rules! my_mac {
+    () => {};
+    ($e:expr) => { $e + 1 };
+}
+
+use std::fmt;
+"#,
+    );
+}
+
+#[test]
+fn raw_strings_preserved() {
+    let input = "fn x() -> &'static str { r#\"hello \"world\"\"# }\nuse std::fmt;\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains("r#\"hello \"world\"\"#"),
+        "raw string mangled:\n{out}"
+    );
+    syn::parse_file(&out).unwrap();
+}
+
+#[test]
 fn complex_file_roundtrips() {
     assert_roundtrip(
         r#"
@@ -82,6 +109,13 @@ mod tests {
 }
 
 #[test]
+fn empty_module_roundtrips() {
+    assert_roundtrip("");
+    assert_roundtrip("\n");
+    assert_roundtrip("//! just docs\n");
+}
+
+#[test]
 fn multi_line_use_roundtrips() {
     assert_roundtrip(
         r#"
@@ -137,29 +171,6 @@ fn derive_attrs_kept_with_struct() {
 }
 
 #[test]
-fn macro_rules_roundtrip() {
-    assert_roundtrip(
-        r#"
-fn x() {}
-
-macro_rules! my_mac {
-    () => {};
-    ($e:expr) => { $e + 1 };
-}
-
-use std::fmt;
-"#,
-    );
-}
-
-#[test]
-fn empty_module_roundtrips() {
-    assert_roundtrip("");
-    assert_roundtrip("\n");
-    assert_roundtrip("//! just docs\n");
-}
-
-#[test]
 fn unicode_identifiers_and_strings() {
     assert_roundtrip(
         r#"
@@ -168,17 +179,6 @@ fn こんにちは() -> &'static str { 名前 }
 use std::fmt;
 "#,
     );
-}
-
-#[test]
-fn raw_strings_preserved() {
-    let input = "fn x() -> &'static str { r#\"hello \"world\"\"# }\nuse std::fmt;\n";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("r#\"hello \"world\"\"#"),
-        "raw string mangled:\n{out}"
-    );
-    syn::parse_file(&out).unwrap();
 }
 
 #[test]

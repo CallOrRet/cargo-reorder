@@ -2,14 +2,17 @@
 //!
 //! The emit phase decides where to insert blank lines:
 //!
-//!   * **Import boundaries** (`group_imports = true`): a blank line goes
-//!     between consecutive import items in different `(category,
-//!     visual)` buckets, and between the last import and the first
-//!     non-import item. `crate` / `super` / `self` / `local-mod` share
-//!     one [`VisualGroup`] so they stay glued together.
+//!   * **Import boundaries** (default, off only with
+//!     `cfg.no_import_groups`): a blank line goes between consecutive
+//!     import items in different `(category, visual)` buckets, and
+//!     between the last import and the first non-import item.
+//!     `crate` / `super` / `self` / `local-mod` share one
+//!     [`VisualGroup`] so they stay glued together.
 //!
-//!   * **`pub mod` / `mod` boundary** (`pub_mod_first = true`): a blank
-//!     line between the two `Mod` sub-buckets.
+//!   * **`pub mod` / `mod` boundary** (only when
+//!     `cfg.no_preserve_mod_order` is on, which opts into
+//!     pub-mod-first grouping): a blank line between the two `Mod`
+//!     sub-buckets.
 //!
 //! Blank lines that already exist in source trivia (a `Block`'s
 //! `leading` / `trailing`) are respected — we never insert a duplicate.
@@ -52,20 +55,9 @@ pub(crate) fn assemble(
     out
 }
 
-fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
-    let already_blank = ends_with_blank_line(&p.trailing) || starts_with_blank_line(&blk.leading);
-    if already_blank {
-        return false;
-    }
-    if cfg.group_imports && import_boundary(p, blk) {
-        return true;
-    }
-    if cfg.pub_mod_first && pub_mod_boundary(p, blk) {
-        return true;
-    }
-    false
+fn is_import_like(c: Category) -> bool {
+    matches!(c, Category::ExternCrate | Category::Use | Category::PubUse)
 }
-
 fn import_boundary(p: &Block, blk: &Block) -> bool {
     let prev_visual = p.import_group.map(ImportGroup::visual);
     let blk_visual = blk.import_group.map(ImportGroup::visual);
@@ -82,6 +74,16 @@ fn pub_mod_boundary(p: &Block, blk: &Block) -> bool {
     p.category == Category::Mod && blk.category == Category::Mod && p.mod_is_pub != blk.mod_is_pub
 }
 
-fn is_import_like(c: Category) -> bool {
-    matches!(c, Category::ExternCrate | Category::Use | Category::PubUse)
+fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
+    let already_blank = ends_with_blank_line(&p.trailing) || starts_with_blank_line(&blk.leading);
+    if already_blank {
+        return false;
+    }
+    if !cfg.no_import_groups && import_boundary(p, blk) {
+        return true;
+    }
+    if cfg.no_preserve_mod_order && pub_mod_boundary(p, blk) {
+        return true;
+    }
+    false
 }

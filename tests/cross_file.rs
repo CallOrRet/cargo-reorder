@@ -1,10 +1,11 @@
-//! Cross-file macro constraint: when reordering a parent file (lib.rs),
-//! we open each `mod foo;` declaration's child file and check whether
-//! it actually invokes any of our local `macro_rules!` bare. Only those
-//! mods need the textual-scope constraint; mods whose child file
-//! imports the macro via `use crate::name;` (or doesn't use it at all)
-//! impose no position constraint and let the macro sort to its default
-//! end-of-file slot.
+//! Cross-file behaviour around `mod foo;` declarations: with macro
+//! items now treated as hard barriers (see `src/macros.rs`), the
+//! parent file no longer opens child files to look for callers — the
+//! barrier alone keeps every `macro_rules!` pinned in source position.
+//! These tests cover the leftover surface area:
+//!   * `mod foo;` lookup still locates `src/foo.rs` / `src/foo/mod.rs`
+//!   * `#[path = "..."]` overrides are honoured
+//!   * missing child files don't crash discovery
 
 use std::env;
 use std::fs;
@@ -31,6 +32,7 @@ impl TempDir {
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
+
     fn write(&self, rel: &str, src: &str) -> PathBuf {
         let p = self.dir.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -44,94 +46,10 @@ impl Drop for TempDir {
     }
 }
 
-/// Real-world shape: original parent file has the macro declared *before*
-/// the `mod foo;` (so it compiles via Rust's textual-scope inheritance).
-/// Default category sort would push the macro to the end (Category::Macro
-/// weight 92) and the mod near the top (weight 30), breaking the file.
-/// The cross-file scan must detect that paths.rs invokes `t!()` bare and
-/// keep the macro above the mod in the output.
-#[test]
-fn child_with_bare_macro_call_keeps_macro_above_mod() {
-    let td = TempDir::new("constrains");
-    td.write("src/paths.rs", "pub fn helper() {\n    t!(\"hi\");\n}\n");
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_macro < p_mod,
-        "macro_rules! t! must precede `mod paths;` because paths.rs invokes t!() bare:\n{out}"
-    );
-}
-
-/// Same shape but the child file does `use crate::t;`. Now the macro
-/// is reachable through name resolution, no textual scope needed, and
-/// the cross-file scan should drop the position constraint — the
-/// macro is free to sort to its default end-of-file slot.
-#[test]
-fn child_using_use_crate_macro_relaxes_constraint() {
-    let td = TempDir::new("relaxes");
-    td.write(
-        "src/paths.rs",
-        "use crate::t;\npub fn helper() {\n    t!(\"hi\");\n}\n",
-    );
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_mod < p_macro,
-        "with `use crate::t;` in paths.rs, the macro is free to sort to its default end-of-file position:\n{out}"
-    );
-}
-
-/// Child doesn't reference the macro at all → no constraint.
-#[test]
-fn child_that_does_not_use_the_macro_does_not_constrain() {
-    let td = TempDir::new("unused");
-    td.write("src/paths.rs", "pub fn helper() {}\n");
-    let lib = td.write(
-        "src/lib.rs",
-        r#"#[macro_export]
-macro_rules! t {
-    ($e:expr) => { let _ = $e; };
-}
-
-pub mod paths;
-"#,
-    );
-    let src = fs::read_to_string(&lib).unwrap();
-    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
-    let p_macro = out.find("macro_rules! t").unwrap();
-    let p_mod = out.find("pub mod paths").unwrap();
-    assert!(
-        p_mod < p_macro,
-        "child doesn't use the macro at all → no position constraint:\n{out}"
-    );
-}
-
-/// `#[path = "..."]` overrides the conventional file lookup. The
-/// cross-file scan must follow it.
+/// `#[path = "..."]` overrides the conventional child-file lookup.
+/// Reorder still pins the `macro_rules!` at its source position via
+/// the barrier rule and `pub mod helper` declared underneath stays
+/// below it, regardless of where the child file actually lives.
 #[test]
 fn path_attribute_on_mod_locates_child_file() {
     let td = TempDir::new("path_attr");
@@ -160,9 +78,10 @@ pub mod helper;
     );
 }
 
-/// `mod absent;` declared but `absent.rs` doesn't exist on disk →
-/// cross-file scan can't read it → fall back to the conservative rule
-/// (mod was originally after the macro in source, so we preserve that).
+/// `mod absent;` declared but `absent.rs` doesn't exist on disk —
+/// missing child files are not consulted; the macro-as-barrier rule
+/// alone keeps `mod absent;` below the `macro_rules!` declared above
+/// it in source.
 #[test]
 fn missing_child_file_falls_back_to_conservative() {
     let td = TempDir::new("missing");
@@ -183,5 +102,35 @@ pub mod absent;
     assert!(
         p_macro < p_mod,
         "unreadable child must fall back to conservative — macro before mod:\n{out}"
+    );
+}
+/// Real-world shape: original parent file has the macro declared *before*
+/// the `mod foo;` (so it compiles via Rust's textual-scope inheritance).
+/// Naive category sort would push the macro to the end
+/// (Category::Macro weight 92) and the mod near the top (default
+/// weight 10), breaking the file. The macro-as-barrier rule pins the
+/// `macro_rules!` in its source position, which keeps the mod above
+/// it from sorting down past it — no child-file scan is needed.
+#[test]
+fn child_with_bare_macro_call_keeps_macro_above_mod() {
+    let td = TempDir::new("constrains");
+    td.write("src/paths.rs", "pub fn helper() {\n    t!(\"hi\");\n}\n");
+    let lib = td.write(
+        "src/lib.rs",
+        r#"#[macro_export]
+macro_rules! t {
+    ($e:expr) => { let _ = $e; };
+}
+
+pub mod paths;
+"#,
+    );
+    let src = fs::read_to_string(&lib).unwrap();
+    let out = reorder_source_with_path(&src, Some(&lib), &Default::default()).unwrap();
+    let p_macro = out.find("macro_rules! t").unwrap();
+    let p_mod = out.find("pub mod paths").unwrap();
+    assert!(
+        p_macro < p_mod,
+        "macro_rules! t! must precede `mod paths;` because paths.rs invokes t!() bare:\n{out}"
     );
 }

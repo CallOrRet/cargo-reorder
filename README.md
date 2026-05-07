@@ -10,16 +10,16 @@ to the variant your project prefers.
 ## Default order
 
 1. `extern crate` declarations
-2. `use` imports — three groups separated by a blank line:
+2. `mod` declarations  *(see `--no-mod-before-use` below to flip with `use`)*
+3. `use` imports — three groups separated by a blank line:
    - **std**: `std` / `core` / `alloc`
    - **external**: third-party crates
    - **crate-local**: `crate` → `super` → `self` → local-mod (no blank line inside this block; "local-mod" = a `use foo::...` whose first segment matches a `mod foo;` in the same file)
-3. `pub use` re-exports (same grouping)
-4. `mod` declarations  *(see `--mod-before-use` below for the minority convention of putting `mod` before `use`)*
+4. `pub use` re-exports (same grouping)
 5. `const` items
 6. `static` items
 7. type aliases (`type X = ...`)
-8. `trait`s — each followed by its `impl Trait for X` blocks where `X` is not declared in this file (so the impl anchors on the trait instead). *(Use `--struct-before-trait` to swap with #9 / #10.)*
+8. `trait`s — each followed by its `impl Trait for X` blocks where `X` is not declared in this file (so the impl anchors on the trait instead). *(Use `--no-trait-before-struct` to swap with #9 / #10.)*
 9. `enum`s — each followed by its own `impl` blocks
 10. `struct`s / `union`s — each followed by its own `impl` blocks
 11. unanchored `impl` blocks — neither the target type nor the trait is declared in this file (e.g. an impl in `submod.rs` whose target lives in `lib.rs`)
@@ -60,6 +60,12 @@ Single-segment names that aren't path-qualified, aren't imported,
 aren't declared locally, and aren't in the prelude fall through to
 "external".
 
+Within a single classification bucket, **shorter trait paths sort
+first** (on by default; disable with `--no-short-trait-path-first`).
+So `impl Default for Foo` precedes `impl std::default::Default for Foo`
+when both target the same type. With the flag off, source order is
+preserved.
+
 Within every other category the original relative order is preserved
 (stable sort).
 
@@ -87,8 +93,6 @@ mod tests {
 async fn fetch() {}
 
 fn helper() -> i32 { 1 }
-
-macro_rules! shout { ($e:expr) => { $e } }
 
 extern "C" {
     fn external();
@@ -143,6 +147,9 @@ verbatim by piping the input above through the binary):
 
 extern crate alloc;
 
+mod helpers;
+pub mod public_api;
+
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -154,11 +161,6 @@ use helpers::Helper;
 pub use std::sync::Arc;
 
 pub use crate::public_api::Reexported;
-
-macro_rules! shout { ($e:expr) => { $e } }
-
-mod helpers;
-pub mod public_api;
 
 const MAX: u32 = 100;
 
@@ -204,24 +206,18 @@ Things to notice:
 * `//! crate docs` and `#![allow(dead_code)]` stay at the top — file-level
   trivia is never reshuffled.
 * `extern crate alloc;` lands first, separated by a blank line from
-  the `use` block.
+  the rest.
+* `mod` declarations come next (default is mod-first; pass
+  `--no-mod-before-use` to flip).
 * `use` is split into three visually distinct groups (std / external /
   crate-local) with blank lines between them. Inside the third group
   the order is `crate` → `super` → `self` → local-mod (`helpers`,
   matched by the file-level `mod helpers;` declaration).
 * `pub use` mirrors the same sub-grouping but sits in its own block
   after `use`.
-* `macro_rules! shout` lands **above** `mod helpers;` / `mod public_api;`
-  in this particular run because the worked example is run on a
-  standalone single file — there is no `helpers.rs` / `public_api.rs`
-  to scan, so the cross-file pass falls back to its conservative rule
-  ("pin every `macro_rules!` ahead of any later `mod foo;` whose child
-  we cannot inspect, in case it bare-invokes the macro"). In a real
-  cargo project where the child files exist, the reorderer opens them
-  and only applies the constraint when the child actually does a bare
-  `shout!()` call without `use crate::shout;`. Without such a caller,
-  `macro_rules! shout` would sort at its default `Category::Macro`
-  position near the end of the file.
+* No `macro_rules!` in this example. When present, every macro item
+  is a barrier (see "Macro items are hard barriers" below) and the
+  surrounding sort is split into independent before / after segments.
 * `struct Foo` is followed by its three `impl` blocks in the order
   inherent (`impl Foo`) → std trait (`impl Display for Foo`) →
   external trait (`impl other_crate::Trait for Foo`).
@@ -236,31 +232,38 @@ Grouped by function.
 
 ### Discovery scope (which files to process)
 
+The selection flags are intentionally a subset of `cargo fmt`'s — the
+same combination always produces the same file set. Direct file or
+directory arguments are not supported (cargo fmt doesn't accept them
+either): work at the package level instead.
+
 | Flag | Effect |
 | --- | --- |
 | `--all` | process every workspace member (matches `cargo fmt --all`) |
 | `-p`, `--package <NAME>` | process only the named package(s) (matches `cargo fmt -p NAME`); repeat for multiple |
 | `--manifest-path <PATH>` | use a specific `Cargo.toml` for discovery |
-| `--exclude <substr>` | skip files whose path contains the given substring |
 
 ### Item ordering policy
 
 | Flag | Effect |
 | --- | --- |
-| `--pub-mod-first` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--pub-mod-first`" below) |
-| `--mod-before-use` | put `mod` before `use` (minority convention; see "On `--mod-before-use`" below) |
-| `--struct-before-trait` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--struct-before-trait`" below) |
-| `--no-import-groups` | don't split imports into std / external / crate |
-| `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
 | `--no-tests-last` | don't force `#[cfg(test)] mod tests` to the end |
+| `--no-impl-grouping` | don't anchor `impl` blocks to their type — all impls go in one bucket |
+| `--no-import-groups` | don't split imports into std / external / crate |
+| `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
+| `--no-reorder-fields` | preserve source order of named fields inside `struct` / `union` / `enum` (default groups them by snake_case / PascalCase prefix and sorts shortest-first within each group, see "On `--no-reorder-fields`" below) |
+| `--no-reorder-impl-fns` | preserve source order of members inside every `impl` / `trait` body (covers `const` / `type` / `fn` / `async fn`); the field-level and top-level grouping still apply |
+| `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
 | `--no-reorder-inline-mods` | don't reorder bodies of inline `mod foo { ... }` blocks (see "On `--no-reorder-inline-mods`" below) |
+| `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
+| `--no-short-trait-path-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
 
 ### Output mode
 
 | Flag | Effect |
 | --- | --- |
+| `--fmt` | run `cargo fmt` (with the same `--all` / `-p` / `--manifest-path` you passed) before reordering. Skipped under `--check` so a CI gate doesn't write to disk. |
 | `--check` | exit 1 if any file would change (CI mode) |
-| `--stdout` | print to stdout instead of rewriting in place |
 | `-v`, `--verbose` | log every rewritten file (default mode is silent) |
 | `--color <auto\|always\|never>` | colour `--check` diffs (red `-`, green `+`, cyan header) and parse errors. Default `auto`: only when stderr is a tty and `NO_COLOR` is unset. |
 
@@ -270,9 +273,14 @@ Grouped by function.
 > means all visibility variants (`pub`, `pub(crate)`, `pub(super)`,
 > `pub(in path)`) and inline `mod foo { ... }` nesting are handled
 > correctly. Each scope (file body OR inline non-test `mod` body)
-> contributes one observation; **test mods** (named `tests` /
-> `test`, or `#[cfg(test)]`-attributed) are skipped both as their
-> own observation and as something to recurse into.
+> contributes one observation. For two item kinds A and B, the
+> scope's verdict is **pair-majority**: count every (a, b) pair and
+> see whether more of them have a-before-b or b-before-a; the
+> winning side gets the vote, an exact split is "tied". This is
+> robust to zig-zag layouts (`mod a; use x; mod b; use y; ...`)
+> in a way that "first occurrence" is not. **Test mods** (named
+> `tests` / `test`, or `#[cfg(test)]`-attributed) are skipped
+> entirely.
 
 ### Reproducing the numbers
 
@@ -285,10 +293,12 @@ cargo build --release --bin sample-stats
 # One project:
 ./target/release/sample-stats ~/src/serde
 
-# Many at once — totals are aggregated across all of them:
+# Many at once — each project votes once in the rollup:
 ./target/release/sample-stats \
-    ~/src/anyhow ~/src/serde ~/src/clap ~/src/regex \
-    ~/src/syn ~/src/ripgrep ~/src/tracing ~/src/tokio ~/src/cargo
+    ~/src/anyhow ~/src/axum ~/src/bat ~/src/bevy ~/src/cargo \
+    ~/src/chrono ~/src/clap ~/src/diesel ~/src/hyper ~/src/itertools \
+    ~/src/rayon ~/src/regex ~/src/reqwest ~/src/ripgrep ~/src/rust-analyzer \
+    ~/src/serde ~/src/syn ~/src/thiserror ~/src/tokio ~/src/tower ~/src/tracing
 ```
 
 Per-project progress goes to **stderr**; the three Markdown
@@ -300,81 +310,206 @@ go to **stdout**, so you can pipe them straight into a doc:
 ```
 
 Each `.rs` file under every given directory is parsed with
-`syn::parse_file` (`target/` and `.git/` are skipped). Files
-that fail to parse are counted under `parse-skipped` in the
-stderr line and don't contribute observations. There are no
-flags — every observation rule (test-mod skipping, inline-mod
-recursion, visibility handling) is fixed by the source.
+`syn::parse_file`. Skipped at the directory level: `target/`,
+`.git/`, plus the conventional non-library directories
+`tests/`, `examples/`, and `benches/` — those follow integration
+conventions (`mod common;` shims, derive-UI fixtures, throw-away
+structs) that don't reflect how the project's library source
+organises items. Files that fail to parse are counted under
+`parse-skipped` in the stderr line and don't contribute
+observations. There are no flags — every observation rule
+(test-mod skipping, inline-mod recursion, visibility handling)
+is fixed by the source.
 
-## On `--pub-mod-first`
+## On `--no-preserve-mod-order`
 
 Counting scopes that contain BOTH a `pub mod foo;` and a private
 `mod foo;` declaration (external declarations only, not inline
-`mod foo { ... }` blocks) — 64 scopes across the 9 projects:
+`mod foo { ... }` blocks) — 200 scopes across 19 of the 21 projects
+(thiserror and anyhow have no qualifying scopes):
 
-| project | pub-first | priv-first | interleaved |
+| project | pub-first | priv-first | tied |
 | --- | --: | --: | --: |
-| ripgrep | 0 | 0 | 1 |
+| axum | 4 | 5 | 0 |
+| bat | 1 | 2 | 0 |
+| bevy | 25 | 21 | 1 |
+| cargo | 4 | 5 | 5 |
+| chrono | 1 | 1 | 1 |
+| clap | 2 | 5 | 0 |
+| diesel | 17 | 7 | 1 |
+| hyper | 2 | 1 | 0 |
+| itertools | 1 | 0 | 1 |
+| rayon | 2 | 0 | 0 |
+| regex | 6 | 1 | 1 |
+| reqwest | 3 | 0 | 1 |
+| ripgrep | 0 | 1 | 0 |
+| rust-analyzer | 14 | 13 | 1 |
 | serde | 4 | 2 | 0 |
-| syn | 1 | 0 | 1 |
-| clap | 1 | 4 | 2 |
-| regex | 2 | 1 | 5 |
-| tracing | 1 | 3 | 3 |
-| cargo | 2 | 2 | 10 |
-| tokio | 3 | 2 | 14 |
+| syn | 1 | 1 | 0 |
+| tokio | 8 | 9 | 2 |
+| tower | 7 | 3 | 0 |
+| tracing | 4 | 3 | 0 |
 
-Aggregate: **22% pub-first, 22% private-first, 56% interleaved**.
-Default keeps the relative order from the source — `pub mod` and
-`mod` aren't reshuffled by visibility.
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **10/19
+pub-first (53%), 5/19 priv-first (26%), 4/19 tied (21%)**.
+Slight pub-first lean. Default still keeps the relative order from
+the source — turning the flip on by default would silently shuffle
+files for the ~26% of projects that lean priv-first plus the ~21%
+that are split. Pass `--no-preserve-mod-order` if your project follows the
+majority pattern.
 
-## On `--mod-before-use`
+## On `--no-mod-before-use`
 
 There is **no official rule** about whether `mod` or `use` comes
-first. Counting scopes that contain both an external `mod foo;`
-declaration and a `use ...;` — 254 scopes across the 9 projects
+first; rustfmt is silent on this. Counting scopes that contain both
+an external `mod foo;` declaration and a `use ...;` — 618 scopes
+across the 21 projects
 (inline `mod foo { ... }` blocks don't count as `mod` declarations
 for this comparison; their bodies are sampled separately as their
 own scopes):
 
-| project | use-first | mod-first |
-| --- | --: | --: |
-| ripgrep | 100% | 0% |
-| cargo | 100% | 0% |
-| regex | 96% | 4% |
-| tracing | 96% | 4% |
-| clap | 95% | 5% |
-| anyhow | 83% | 17% |
-| serde | 78% | 22% |
-| tokio | 42% | 58% |
-| syn | 15% | 85% |
+Counts are scope-vote tallies (each scope votes once via
+pair-majority for use-first / mod-first / tied):
 
-Aggregate: **76% use-first, 24% mod-first**. Default is use-first;
-pass `--mod-before-use` if your project leans the other way (notably
-`syn`, which is overwhelmingly mod-first inside its many inline
-sub-modules, and `tokio`, which is mod-first across its workspace).
+| project | use-first | mod-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 0 | 1 | 0 |
+| axum | 8 | 11 | 2 |
+| bat | 3 | 2 | 0 |
+| bevy | 40 | 133 | 1 |
+| cargo | 28 | 13 | 1 |
+| chrono | 6 | 3 | 0 |
+| clap | 4 | 16 | 0 |
+| diesel | 16 | 33 | 2 |
+| hyper | 5 | 5 | 0 |
+| itertools | 1 | 1 | 0 |
+| rayon | 4 | 5 | 2 |
+| regex | 21 | 3 | 0 |
+| reqwest | 4 | 2 | 0 |
+| ripgrep | 11 | 1 | 0 |
+| rust-analyzer | 31 | 85 | 1 |
+| serde | 2 | 11 | 0 |
+| syn | 0 | 2 | 0 |
+| thiserror | 0 | 2 | 0 |
+| tokio | 9 | 39 | 0 |
+| tower | 2 | 22 | 1 |
+| tracing | 15 | 7 | 1 |
 
-## On `--struct-before-trait`
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **7/21 use-first
+(33%), 12/21 mod-first (57%), 2/21 tied (10%)**. The default is
+**mod-first** to match this majority. Pass `--no-mod-before-use` if
+your project is on the use-first side (notably `regex`, `ripgrep`,
+`cargo`, `chrono`, `tracing`, `rayon`, `reqwest`).
+
+## On `--no-trait-before-struct`
 
 Counting `trait` vs `struct` / `enum` / `union` declarations in
-scopes that have both — 105 scopes across the 9 projects:
+scopes that have both — 455 scopes across 20 of the 21 projects
+(thiserror has no qualifying scopes):
 
-| project | trait-first | struct-first |
-| --- | --: | --: |
-| anyhow | 5 | 0 |
-| clap | 9 | 0 |
-| ripgrep | 4 | 0 |
-| syn | 7 | 0 |
-| cargo | 20 | 0 |
-| regex | 13 | 1 |
-| tracing | 17 | 2 |
-| serde | 4 | 4 |
-| tokio | 12 | 7 |
+| project | trait-first | struct-first | tied |
+| --- | --: | --: | --: |
+| anyhow | 1 | 2 | 1 |
+| axum | 7 | 2 | 2 |
+| bat | 2 | 1 | 0 |
+| bevy | 94 | 47 | 12 |
+| cargo | 11 | 7 | 0 |
+| chrono | 1 | 1 | 0 |
+| clap | 4 | 4 | 1 |
+| diesel | 27 | 34 | 8 |
+| hyper | 4 | 2 | 3 |
+| itertools | 7 | 3 | 2 |
+| rayon | 10 | 3 | 0 |
+| regex | 7 | 6 | 1 |
+| reqwest | 7 | 5 | 0 |
+| ripgrep | 2 | 2 | 0 |
+| rust-analyzer | 28 | 31 | 3 |
+| serde | 3 | 2 | 0 |
+| syn | 3 | 2 | 2 |
+| tokio | 11 | 4 | 2 |
+| tower | 10 | 2 | 0 |
+| tracing | 12 | 7 | 0 |
 
-Aggregate: **87% trait-first, 13% struct-first** — strongly
-trait-first. Most crate-internal abstractions are written as
-`pub(crate) trait` *before* the `struct`s that implement them.
-Default is trait-first; pass `--struct-before-trait` only if your
-project bucks this pattern.
+Aggregate by project (each project votes once for whichever side
+wins its internal majority, ties counted separately): **14/20
+trait-first (70%), 3/20 struct-first (15%), 3/20 tied (15%)**.
+Strongly trait-first. Default is trait-first; pass
+`--no-trait-before-struct` if your project bucks this pattern.
+
+## On `--no-reorder-fields`
+
+By default cargo-reorder applies the same grouping rule at **three
+levels**:
+
+- **Field-level**: named fields inside each `struct` / `union`,
+  named fields inside each struct-like enum variant, and the
+  variants of each `enum`.
+- **Top-level (within category)**: among consecutive top-level
+  `struct` / `union` / `enum` / `trait` / `fn` / `async fn` items,
+  same-category siblings are reordered by the same prefix-grouping +
+  length rules. An `impl` block follows whichever type it anchors
+  to, so `struct Foo` + `impl Foo` stays together when `Foo` moves.
+- **Inside `impl` and `trait` bodies**: members are sorted into the
+  same category order used at the top level — `const` → `type` →
+  `fn` → `async fn` — and within each category the prefix-group +
+  length rule applies. Macro / verbatim members are barriers: their
+  presence leaves the whole body verbatim.
+
+The rules in all three cases:
+
+1. **Group** by the identifier's first "word":
+   - For snake_case: text up to the first `_` (`foo_bar` → `foo`).
+   - For PascalCase / camelCase: text up to the first
+     lowercase→uppercase boundary (`FooBar` → `Foo`,
+     `fooBar` → `foo`). Names with no boundary at all
+     (`Foo`, `BAR`, `XMLParser`) are their own one-element group.
+2. **Within a group**: sort by name length, shortest first
+   (`bar_x` before `bar_long_name`). Ties preserve source order.
+3. **Between groups**: order ascending by the group's **mean
+   name length** (sum of all member names' lengths / member count).
+   Ties preserve source order.
+4. A **blank line** separates consecutive groups; within a group
+   fields stay packed together.
+
+Worked example (input on the left, output on the right):
+
+```rust
+struct Foo {                  struct Foo {
+    foo_loooong: String,          bar_x: u8,
+    bar_x: u8,                    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,             foo_short: u8,
+    bar_y: u32,                   foo_medium: bool,
+}                                 foo_loooong: String,
+                              }
+```
+
+Pass `--no-reorder-fields` to disable all three passes — top-level
+items fall back to category-then-source-order, the inside of each
+`struct` / `union` / `enum` is left exactly as written, and `impl` /
+`trait` bodies stay in source order. Pass the more targeted
+`--no-reorder-impl-fns` if you only want to keep `impl` / `trait`
+bodies in source order while keeping the other two passes on (e.g.
+when methods follow a deliberate sequence — builder chains,
+lifecycle order — but field grouping is still desirable).
+
+The field-level pass automatically **skips** any item whose layout
+or derived semantics would change with reordering:
+
+| Pattern | Why we skip |
+| --- | --- |
+| Any `#[repr(...)]` (C, packed, transparent, align(N), int reprs) | reordering would change ABI / memory layout |
+| `#[derive(Ord)]` or `#[derive(PartialOrd)]` | derived comparison reads fields/variants in source order |
+| `enum` with any explicit discriminant (`A = 1`) | reordering silently shifts the implicit values for the rest |
+| Tuple struct / tuple variant / unit struct / unit variant | no field names to group on |
+| Single-line layouts (`struct S { a: u8, b: u8 }`) | line-based slicing can't disentangle them — left intact |
+| Fewer than 2 fields | nothing to sort |
+
+These skips are conservative on purpose: the goal is "field
+reorder is always safe to apply with default settings". If your
+codebase has a case we should also skip, open an issue.
 
 ## On `--no-reorder-inline-mods`
 
@@ -389,20 +524,14 @@ listing order is part of the contract or affects compilation:
 
 | Pattern | Why we skip |
 | --- | --- |
-| `#[cfg(test)] mod ...` / `mod tests { ... }` | already pulled to file end by `--tests-last`; reordering test fixtures hides intent |
+| `#[cfg(test)] mod ...` / `mod tests { ... }` | already pulled to file end by the default tests-last rule (off via `--no-tests-last`); reordering test fixtures hides intent |
 | `#[macro_use] mod ...` | `macro_rules!` defined inside leak to the parent scope; reordering inside changes visibility order |
 | Pure-`use` mods (every item is `use ...`) | covers `prelude`, `__private`, sealed-trait re-export shims — listing order is the public contract |
 
 A mod with at least one non-`use` item is eligible. Inside an
-eligible body, cross-file macro-caller scanning is **precise**:
-when the parent file has a known path, the recursion synthesises
-the inline mod's child mod-directory (`<parent_dir>/<mod_name>/`,
-or the directory derived from `#[path = "..."]` on the inline
-mod) and uses it to locate `mod bar;` child files inside the
-body. So a `macro_rules!` defined in the inline mod is only
-constrained to precede those `mod bar;` declarations whose child
-files actually call it bare — same precision guarantee as at the
-file top level.
+eligible body, every `macro_rules!` is treated as a barrier just
+like at the file top level — it pins in place and forbids body
+items from reordering across it.
 
 The flag is off by default because `prelude`-style modules and
 codegen scaffolding are common enough that surprise reorders
@@ -441,20 +570,20 @@ Comments and attributes are preserved:
 ## Usage
 
 ```shell
-# Rewrite files in place
-cargo-reorder src/
+# Reorder the current package
+cargo-reorder
 
-# Rewrite a single file
-cargo-reorder src/lib.rs
+# Reorder every member of a workspace
+cargo-reorder --all
 
-# Print to stdout instead of editing
-cargo-reorder --stdout src/lib.rs
-
-# Read from stdin / write to stdout
-cargo-reorder < input.rs > output.rs
+# Reorder only specific packages
+cargo-reorder -p foo -p bar
 
 # CI mode: exit 1 if anything would change
-cargo-reorder --check src/
+cargo-reorder --check --all
+
+# Run `cargo fmt` first, then reorder
+cargo-reorder --fmt --all
 ```
 
 ## Tested
@@ -501,8 +630,8 @@ concern:
 | `tests/items.rs` | each of the 16 top-level item categories lands in its slot |
 | `tests/imports.rs` | `extern crate` / `use` / `pub use` grouping and renames |
 | `tests/impls.rs` | impl anchoring and the 4-tier inherent → std → crate → external order |
-| `tests/macros.rs` | `macro_rules!` placement, chains, barriers, cfg-gated alternatives |
-| `tests/cross_file.rs` | scanning child mod files for actual bare uses of local macros |
+| `tests/macros.rs` | macro-as-barrier semantics: pinning, segment isolation, idempotence |
+| `tests/cross_file.rs` | `mod foo;` lookup, `#[path]` overrides, missing-child fallback |
 | `tests/comments.rs` | leading comments, inner doc, file-level header blocks |
 | `tests/attributes.rs` | `#[derive(...)]` / `#[cfg(...)]` / `#[cfg_attr]` / multi-line attrs |
 | `tests/generics.rs` | lifetimes, where clauses, const generics, GAT, HRTB, `async fn in trait` |
@@ -515,15 +644,23 @@ concern:
 
 ### Caveats discovered during validation
 
-* **`macro_rules!` is textually scoped.** A `macro_rules! foo` is
-  visible only after its definition (within the same file, and within
-  child modules whose `mod foo;` declaration sits *after* the macro
-  definition). The reorderer therefore (a) treats every bare top-level
-  macro invocation (`Item::Macro` with no `ident`, e.g.
-  `lazy_static! { ... }`) as a barrier that no other item is reordered
-  across, and (b) post-processes its sorted output to yank every
-  `macro_rules!` definition back to just before its first caller and
-  before any subsequent file `mod foo;` declaration.
+* **Macro items are hard barriers.** `macro_rules!` is textually
+  scoped, and call sites can hide in many shapes (struct-field-init
+  position, type annotations, deeply nested in a sibling file
+  reached through `#[macro_use] mod`, …). Rather than try to detect
+  every caller correctly, the reorderer pins every macro-related
+  top-level item in its source position and forbids any other item
+  from reordering across it. The barrier set:
+  - `macro_rules! foo` (with or without ident) — pins itself
+  - bare top-level `lazy_static! { ... }` / `to_hash_map!(...)` style
+    invocations — pin themselves
+  - `#[macro_use] mod foo;` — pins itself, since its child's exported
+    macros leak into this scope from this point downward
+
+  Trade-off: a file with several macros gets split into multiple
+  independent sort segments, so the result is sometimes less
+  thoroughly reordered than it could be. In exchange, the rule is
+  trivial to reason about and never produces uncompilable output.
 * **RFC 3502 cargo-script files are supported.** Single-file scripts
   with a leading `---` ... `---` TOML frontmatter (with or without a
   preceding shebang) are detected, the frontmatter is preserved

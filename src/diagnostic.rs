@@ -26,12 +26,14 @@ const RESET: &str = "\x1b[0m";
 /// Whether to emit ANSI colour escapes. Mirrors rustfmt's `--color`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
-    /// Always emit colour, regardless of tty / `NO_COLOR`.
-    Always,
-    /// Never emit colour.
-    Never,
     /// Emit colour only when the sink is a tty and `NO_COLOR` is unset.
     Auto,
+
+    /// Never emit colour.
+    Never,
+
+    /// Always emit colour, regardless of tty / `NO_COLOR`.
+    Always,
 }
 
 impl Color {
@@ -43,6 +45,71 @@ impl Color {
             Color::Auto => io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
         }
     }
+}
+
+/// Write a unified diff between `original` and `reordered`, prefixed with
+/// `Diff in <path> at line <N>:` headers — rustfmt's `--check` format.
+pub fn write_diff(w: impl Write, path: &Path, original: &str, reordered: &str) -> io::Result<()> {
+    write_diff_colored(w, path, original, reordered, false)
+}
+
+/// Same as [`write_diff`] but emits ANSI colour escapes for `-` (red),
+/// `+` (green), and the `Diff in ...` header (cyan) when `color` is true.
+pub fn write_diff_colored(
+    mut w: impl Write,
+    path: &Path,
+    original: &str,
+    reordered: &str,
+    color: bool,
+) -> io::Result<()> {
+    let diff = TextDiff::from_lines(original, reordered);
+    for group in diff.grouped_ops(3) {
+        if group.is_empty() {
+            continue;
+        }
+        let first = group.first().unwrap();
+        let old_start = first.old_range().start;
+        if color {
+            writeln!(
+                w,
+                "{CYAN}Diff in {} at line {}:{RESET}",
+                path.display(),
+                old_start + 1
+            )?;
+        } else {
+            writeln!(w, "Diff in {} at line {}:", path.display(), old_start + 1)?;
+        }
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let mut value = change.value().to_string();
+                if value.ends_with('\n') {
+                    value.pop();
+                    if value.ends_with('\r') {
+                        value.pop();
+                    }
+                }
+                match change.tag() {
+                    ChangeTag::Equal => writeln!(w, " {value}")?,
+                    ChangeTag::Delete => {
+                        if color {
+                            writeln!(w, "{RED}-{value}{RESET}")?;
+                        } else {
+                            writeln!(w, "-{value}")?;
+                        }
+                    }
+                    ChangeTag::Insert => {
+                        if color {
+                            writeln!(w, "{GREEN}+{value}{RESET}")?;
+                        } else {
+                            writeln!(w, "+{value}")?;
+                        }
+                    }
+                }
+            }
+        }
+        writeln!(w)?;
+    }
+    Ok(())
 }
 
 /// Render a `syn::Error` in rustc style.
@@ -111,71 +178,6 @@ pub fn format_parse_error_colored(
         width = gutter_width,
     ));
     out
-}
-
-/// Write a unified diff between `original` and `reordered`, prefixed with
-/// `Diff in <path> at line <N>:` headers — rustfmt's `--check` format.
-pub fn write_diff(w: impl Write, path: &Path, original: &str, reordered: &str) -> io::Result<()> {
-    write_diff_colored(w, path, original, reordered, false)
-}
-
-/// Same as [`write_diff`] but emits ANSI colour escapes for `-` (red),
-/// `+` (green), and the `Diff in ...` header (cyan) when `color` is true.
-pub fn write_diff_colored(
-    mut w: impl Write,
-    path: &Path,
-    original: &str,
-    reordered: &str,
-    color: bool,
-) -> io::Result<()> {
-    let diff = TextDiff::from_lines(original, reordered);
-    for group in diff.grouped_ops(3) {
-        if group.is_empty() {
-            continue;
-        }
-        let first = group.first().unwrap();
-        let old_start = first.old_range().start;
-        if color {
-            writeln!(
-                w,
-                "{CYAN}Diff in {} at line {}:{RESET}",
-                path.display(),
-                old_start + 1
-            )?;
-        } else {
-            writeln!(w, "Diff in {} at line {}:", path.display(), old_start + 1)?;
-        }
-        for op in &group {
-            for change in diff.iter_changes(op) {
-                let mut value = change.value().to_string();
-                if value.ends_with('\n') {
-                    value.pop();
-                    if value.ends_with('\r') {
-                        value.pop();
-                    }
-                }
-                match change.tag() {
-                    ChangeTag::Equal => writeln!(w, " {value}")?,
-                    ChangeTag::Delete => {
-                        if color {
-                            writeln!(w, "{RED}-{value}{RESET}")?;
-                        } else {
-                            writeln!(w, "-{value}")?;
-                        }
-                    }
-                    ChangeTag::Insert => {
-                        if color {
-                            writeln!(w, "{GREEN}+{value}{RESET}")?;
-                        } else {
-                            writeln!(w, "+{value}")?;
-                        }
-                    }
-                }
-            }
-        }
-        writeln!(w)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

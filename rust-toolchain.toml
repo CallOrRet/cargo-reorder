@@ -8,6 +8,6 @@
 # minimum is the `rust-version = "1.85"` field in Cargo.toml.
 
 [toolchain]
-channel = "1.95.0"
+channel    = "1.95.0"
 components = ["clippy", "rustfmt", "rust-analyzer"]
-profile = "minimal"
+profile    = "minimal"

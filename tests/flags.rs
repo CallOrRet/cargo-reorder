@@ -4,23 +4,11 @@
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 #[test]
-fn default_is_use_first() {
+fn default_is_mod_before_use() {
+    // Default order puts `mod foo;` before `use ...;` — matches the
+    // pair-majority of the 21-project sample (12/21 mod-first).
     let input = "use std::fmt;\nmod child;\n";
     let out = reorder_source(input).unwrap();
-    assert!(
-        out.find("use std::fmt").unwrap() < out.find("mod child").unwrap(),
-        "{out}"
-    );
-}
-
-#[test]
-fn mod_before_use_swaps() {
-    let input = "use std::fmt;\nmod child;\n";
-    let cfg = Config {
-        mod_before_use: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
     assert!(
         out.find("mod child").unwrap() < out.find("use std::fmt").unwrap(),
         "{out}"
@@ -28,24 +16,54 @@ fn mod_before_use_swaps() {
 }
 
 #[test]
-fn no_import_groups_keeps_original_order() {
-    let input = "\
-use crate::a;
-use serde::S;
-use std::fmt;
-";
+fn default_is_trait_before_struct() {
+    let input = "struct S;\ntrait T {}\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.find("trait T").unwrap() < out.find("struct S").unwrap(),
+        "default: trait < struct:\n{out}"
+    );
+}
+
+#[test]
+fn default_lifts_trait_above_enum_too() {
+    let input = "enum E { A }\nstruct S;\ntrait T {}\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.find("trait T").unwrap() < out.find("enum E").unwrap(),
+        "{out}"
+    );
+    assert!(
+        out.find("enum E").unwrap() < out.find("struct S").unwrap(),
+        "{out}"
+    );
+}
+#[test]
+fn struct_before_trait_flag_swaps() {
+    let input = "trait T {}\nstruct S;\n";
     let cfg = Config {
-        group_imports: false,
+        no_trait_before_struct: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
-    let p_crate = out.find("use crate::a").unwrap();
-    let p_serde = out.find("use serde::S").unwrap();
-    let p_std = out.find("use std::fmt").unwrap();
-    // Source order preserved (no std/ext/crate sorting).
-    assert!(p_crate < p_serde && p_serde < p_std, "{out}");
-    // Also no blank lines inserted between them.
-    assert!(!out.contains("use crate::a;\n\n"), "{out}");
+    assert!(
+        out.find("struct S").unwrap() < out.find("trait T").unwrap(),
+        "with flag: struct < trait:\n{out}"
+    );
+}
+
+#[test]
+fn use_before_mod_flips_to_use_first() {
+    let input = "mod child;\nuse std::fmt;\n";
+    let cfg = Config {
+        no_mod_before_use: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    assert!(
+        out.find("use std::fmt").unwrap() < out.find("mod child").unwrap(),
+        "{out}"
+    );
 }
 
 #[test]
@@ -57,7 +75,7 @@ struct Bar;
 impl Bar { fn b() {} }
 ";
     let cfg = Config {
-        group_impls_with_type: false,
+        no_impl_grouping: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -73,6 +91,27 @@ impl Bar { fn b() {} }
 }
 
 #[test]
+fn no_import_groups_keeps_original_order() {
+    let input = "\
+use crate::a;
+use serde::S;
+use std::fmt;
+";
+    let cfg = Config {
+        no_import_groups: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    let p_crate = out.find("use crate::a").unwrap();
+    let p_serde = out.find("use serde::S").unwrap();
+    let p_std = out.find("use std::fmt").unwrap();
+    // Source order preserved (no std/ext/crate sorting).
+    assert!(p_crate < p_serde && p_serde < p_std, "{out}");
+    // Also no blank lines inserted between them.
+    assert!(!out.contains("use crate::a;\n\n"), "{out}");
+}
+
+#[test]
 fn no_tests_last_keeps_test_mod_in_place() {
     let input = "\
 fn before() {}
@@ -83,7 +122,7 @@ mod tests { #[test] fn t() {} }
 fn after() {}
 ";
     let cfg = Config {
-        tests_last: false,
+        no_tests_last: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -104,7 +143,7 @@ mod d;
 pub mod c;
 ";
     let cfg = Config {
-        pub_mod_first: true,
+        no_preserve_mod_order: true,
         ..Config::default()
     };
     let out = reorder_source_with(input, &cfg).unwrap();
@@ -118,27 +157,6 @@ pub mod c;
     assert!(
         between.contains("\n\n"),
         "expected blank line between groups:\n{out}"
-    );
-}
-
-#[test]
-fn pub_mod_first_off_preserves_blank_lines_between_mods() {
-    // Default (pub_mod_first off) must not shuffle mod order AND must
-    // preserve blank lines from the source (they live in `trailing`).
-    let input = "\
-mod a;
-
-mod b;
-mod c;
-
-pub mod d;
-fn x() {}
-";
-    let out = reorder_source(input).unwrap();
-    // Source structure preserved exactly through the mod region.
-    assert!(
-        out.contains("mod a;\n\nmod b;\nmod c;\n\npub mod d;"),
-        "default mode must preserve mod blank lines verbatim:\n{out}"
     );
 }
 
@@ -162,39 +180,22 @@ fn pub_mod_first_off_keeps_interleaved_order() {
 }
 
 #[test]
-fn default_is_trait_before_struct() {
-    let input = "struct S;\ntrait T {}\n";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.find("trait T").unwrap() < out.find("struct S").unwrap(),
-        "default: trait < struct:\n{out}"
-    );
-}
+fn pub_mod_first_off_preserves_blank_lines_between_mods() {
+    // Default (pub_mod_first off) must not shuffle mod order AND must
+    // preserve blank lines from the source (they live in `trailing`).
+    let input = "\
+mod a;
 
-#[test]
-fn struct_before_trait_flag_swaps() {
-    let input = "trait T {}\nstruct S;\n";
-    let cfg = Config {
-        struct_before_trait: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
-    assert!(
-        out.find("struct S").unwrap() < out.find("trait T").unwrap(),
-        "with flag: struct < trait:\n{out}"
-    );
-}
+mod b;
+mod c;
 
-#[test]
-fn default_lifts_trait_above_enum_too() {
-    let input = "enum E { A }\nstruct S;\ntrait T {}\n";
+pub mod d;
+fn x() {}
+";
     let out = reorder_source(input).unwrap();
+    // Source structure preserved exactly through the mod region.
     assert!(
-        out.find("trait T").unwrap() < out.find("enum E").unwrap(),
-        "{out}"
-    );
-    assert!(
-        out.find("enum E").unwrap() < out.find("struct S").unwrap(),
-        "{out}"
+        out.contains("mod a;\n\nmod b;\nmod c;\n\npub mod d;"),
+        "default mode must preserve mod blank lines verbatim:\n{out}"
     );
 }
