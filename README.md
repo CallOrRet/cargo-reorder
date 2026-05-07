@@ -528,6 +528,8 @@ or derived semantics would change with reordering:
 | Any `#[repr(...)]` (C, packed, transparent, align(N), int reprs) | reordering would change ABI / memory layout |
 | `#[derive(Ord)]` or `#[derive(PartialOrd)]` | derived comparison reads fields/variants in source order |
 | `enum` with any explicit discriminant (`A = 1`) | reordering silently shifts the implicit values for the rest |
+| `enum` variant order when any variant is unit-like | reordering fieldless variants can change implicit values |
+| `struct` / `union` with a `?Sized` generic tail field | the unsized tail field must remain last |
 | Tuple struct / tuple variant / unit struct / unit variant | no field names to group on |
 | Fewer than 2 fields | nothing to sort |
 

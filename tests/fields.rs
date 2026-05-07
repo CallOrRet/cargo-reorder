@@ -10,6 +10,7 @@
 //! - any `#[repr(...)]`
 //! - `#[derive(PartialOrd)]` or `#[derive(Ord)]`
 //! - enum with any explicit discriminant (`A = 1`)
+//! - enum variant-order sorting when any variant is unit-like
 //! - tuple / unit fields
 //! - <2 fields/variants
 
@@ -50,13 +51,6 @@ struct S {
     bar_x: u8,
 }
 ";
-    let out = reorder_source(input).unwrap();
-    assert_eq!(out, input);
-}
-
-#[test]
-fn unit_struct_unaffected() {
-    let input = "struct U;\n";
     let out = reorder_source(input).unwrap();
     assert_eq!(out, input);
 }
@@ -233,6 +227,29 @@ fn empty_struct_body_unaffected() {
 }
 
 #[test]
+fn unit_struct_unaffected() {
+    let input = "struct U;\n";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, input);
+}
+
+#[test]
+fn unit_enum_variants_keep_source_order() {
+    let single_line = "enum SingleLine { FooLong, Bar }\n";
+    let out = reorder_source(single_line).unwrap();
+    assert_eq!(out, single_line);
+
+    let multi_line = "\
+enum MultiLine {
+    FooLong,
+    Bar,
+}
+";
+    let out = reorder_source(multi_line).unwrap();
+    assert_eq!(out, multi_line);
+}
+
+#[test]
 fn cfg_attr_with_derive_ord_skipped() {
     // `#[cfg_attr(feature = "x", derive(Ord, PartialOrd))]` pins
     // field order under the matching cfg, so reorder must skip
@@ -266,21 +283,21 @@ enum E {
 fn enum_groups_by_pascal_prefix() {
     let input = "\
 enum E {
-    BarBanana,
-    FooLong,
-    Foo,
-    BarApple,
-    FooMedium,
+    BarBanana { value: u8 },
+    FooLong { value: u8 },
+    Foo { value: u8 },
+    BarApple { value: u8 },
+    FooMedium { value: u8 },
 }
 ";
     let out = reorder_source(input).unwrap();
     let want = "\
 enum E {
-    Foo,
-    FooLong,
-    FooMedium,
-    BarApple,
-    BarBanana,
+    Foo { value: u8 },
+    FooLong { value: u8 },
+    FooMedium { value: u8 },
+    BarApple { value: u8 },
+    BarBanana { value: u8 },
 }
 ";
     assert_eq!(out, want, "got:\n{out}");
@@ -806,6 +823,16 @@ struct S {
 }
 
 #[test]
+fn single_line_unsized_tail_field_stays_last() {
+    let input = "struct S<T: ?Sized> { foo_long: u8, bar: u32, tail: T }\n";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(
+        out,
+        "struct S<T: ?Sized> { bar: u32, foo_long: u8, tail: T }\n"
+    );
+}
+
+#[test]
 fn single_line_reorders_struct_init_and_keeps_rest_last_by_default() {
     let input = "\
 struct S { bar: u32, foo_long: u8, foo: bool }
@@ -834,8 +861,8 @@ enum E { FooLong, Bar }
 enum V { FooThing { foo_long: u8, bar: u32 }, Bar }
 ";
     let want = "\
-enum E { Bar, FooLong }
-enum V { Bar, FooThing { bar: u32, foo_long: u8 } }
+enum E { FooLong, Bar }
+enum V { FooThing { bar: u32, foo_long: u8 }, Bar }
 struct S { bar: u32, foo_long: u8 }
 union U { bar: u32, foo_long: u8 }
 ";

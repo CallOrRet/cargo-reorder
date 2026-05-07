@@ -381,6 +381,8 @@ struct Foo {                  struct Foo {
 | 任何 `#[repr(...)]`（C、packed、transparent、align(N)、整型 repr） | 重排会改 ABI / 内存布局 |
 | `#[derive(Ord)]` 或 `#[derive(PartialOrd)]` | 派生比较按字段/变体声明顺序读 |
 | `enum` 任一变体带显式 discriminant（`A = 1`） | 重排会无声修改其它变体的隐式值 |
+| `enum` 中存在单元变体时的变体顺序 | 重排 fieldless 变体可能改变隐式值 |
+| 带 `?Sized` generic 尾字段的 `struct` / `union` | unsized 尾字段必须保持在最后 |
 | 元组 struct / 元组变体 / 单元 struct / 单元变体 | 没有字段名可分组 |
 | 字段数 < 2 | 没东西可排 |
 

@@ -249,8 +249,8 @@ pub struct Config {
     /// ascending order of the group's mean name length. ABI- and
     /// semantics-affecting shapes are always skipped: any
     /// `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`, enums whose
-    /// any variant carries an explicit discriminant, and tuple/unit
-    /// variants.
+    /// any variant carries an explicit discriminant, enum variant-order
+    /// sorting when any variant is unit-like, and tuple/unit variants.
     pub no_fields: bool,
     /// Disable the prefix-group + length sort applied **inside `impl`
     /// and `trait` bodies** (the const → type → fn → async fn category

@@ -14,8 +14,8 @@
 //! - Existing blank lines before a field move with that field. Field
 //!   sorting does not add blank separators between groups.
 //!
-//! Skip rules — when any of these apply, the item is left exactly as
-//! the user wrote it. Reordering would change ABI, layout, or
+//! Skip rules — when any of these apply, the affected ordering is left
+//! exactly as the user wrote it. Reordering would change ABI, layout, or
 //! derived-trait semantics:
 //! - The container carries any `#[repr(...)]` (`C`, `packed`,
 //!   `transparent`, `align(N)`, integer reprs).
@@ -25,6 +25,9 @@
 //! - On enums, **any** variant has an explicit discriminant
 //!   (`A = 1`); reordering would silently change implicit values for
 //!   the others.
+//! - Enum variant order is left untouched when any variant is unit-like;
+//!   otherwise implicit discriminants on fieldless enums could change.
+//!   Struct-like variant fields may still be sorted independently.
 //! - The body has fewer than two named fields (nothing to do).
 //! - Tuple variants / unit variants / tuple structs — no field
 //!   names to group on.
@@ -79,9 +82,10 @@ impl PartialOrd for GroupSortKey {
 
 #[derive(Clone)]
 struct SortableSpan {
-    lo: usize,
     hi: usize,
+    lo: usize,
     name: String,
+    bucket: u8,
 }
 
 #[derive(Clone)]
@@ -328,6 +332,10 @@ fn rewrite_enum(
         out.replace_range(lo..hi, &replacement);
     }
 
+    if e.variants.iter().any(|v| matches!(v.fields, Fields::Unit)) {
+        return (out != body_text).then_some(out);
+    }
+
     // Step 2: sort the variants themselves. Re-parse `out` to get
     // fresh spans matching the post-rewrite text. Note: `syn::parse_str`
     // restarts span line numbering at 1 within the parsed string, so
@@ -520,7 +528,7 @@ fn rewrite_single_line_list(text: &str, entries: &[SortableSpan]) -> Option<Stri
             .map(|(idx, e)| (idx, e.name.as_str())),
     );
     let mut order: Vec<usize> = (0..entries.len()).collect();
-    order.sort_by_key(|idx| (keys[idx], *idx));
+    order.sort_by_key(|idx| (entries[*idx].bucket, keys[idx], *idx));
 
     let replacement = order
         .iter()
@@ -702,9 +710,10 @@ fn signature_arg_entries(text: &str, sig: &Signature) -> Option<Vec<SortableSpan
         };
         let (lo, hi) = byte_range_for_span(text, input.span())?;
         entries.push(SortableSpan {
-            lo,
             hi,
+            lo,
             name: ident.ident.to_string(),
+            bucket: 0,
         });
     }
     single_line_entries(entries)
@@ -965,13 +974,17 @@ fn single_line_lists_for_item(text: &str, item: &Item) -> Vec<Vec<SortableSpan>>
     match item {
         Item::Struct(s) if !container_skips(&s.attrs) => {
             if let Fields::Named(named) = &s.fields {
-                if let Some(entries) = fields_named_single_line_entries(text, named) {
+                if let Some(entries) =
+                    fields_named_single_line_entries(text, named, has_unsized_generic(&s.generics))
+                {
                     out.push(entries);
                 }
             }
         }
         Item::Union(u) if !container_skips(&u.attrs) => {
-            if let Some(entries) = fields_named_single_line_entries(text, &u.fields) {
+            if let Some(entries) =
+                fields_named_single_line_entries(text, &u.fields, has_unsized_generic(&u.generics))
+            {
                 out.push(entries);
             }
         }
@@ -984,7 +997,7 @@ fn single_line_lists_for_item(text: &str, item: &Item) -> Vec<Vec<SortableSpan>>
             }
             for v in &e.variants {
                 if let Fields::Named(named) = &v.fields {
-                    if let Some(entries) = fields_named_single_line_entries(text, named) {
+                    if let Some(entries) = fields_named_single_line_entries(text, named, false) {
                         out.push(entries);
                     }
                 }
@@ -1173,38 +1186,58 @@ fn expr_struct_single_line_entries(text: &str, expr: &ExprStruct) -> Option<Vec<
         };
         let (lo, hi) = byte_range_for_span(text, f.span())?;
         entries.push(SortableSpan {
-            lo,
             hi,
+            lo,
             name: ident.to_string(),
+            bucket: 0,
         });
     }
     single_line_entries(entries)
 }
 
-fn fields_named_single_line_entries(text: &str, named: &FieldsNamed) -> Option<Vec<SortableSpan>> {
+fn fields_named_single_line_entries(
+    text: &str,
+    named: &FieldsNamed,
+    pin_last: bool,
+) -> Option<Vec<SortableSpan>> {
     if named.named.len() < 2 || named.named.iter().any(|f| !f.attrs.is_empty()) {
         return None;
     }
     let mut entries = Vec::with_capacity(named.named.len());
-    for f in &named.named {
+    let last_index = named.named.len().saturating_sub(1);
+    for (idx, f) in named.named.iter().enumerate() {
         let name = f.ident.as_ref()?.to_string();
         let (lo, hi) = byte_range_for_span(text, f.span())?;
-        entries.push(SortableSpan { lo, hi, name });
+        entries.push(SortableSpan {
+            hi,
+            lo,
+            name,
+            bucket: if pin_last && idx == last_index {
+                PIN_LAST
+            } else {
+                0
+            },
+        });
     }
     single_line_entries(entries)
 }
 
 fn enum_variant_single_line_entries(text: &str, e: &ItemEnum) -> Option<Vec<SortableSpan>> {
-    if e.variants.len() < 2 || e.variants.iter().any(|v| !v.attrs.is_empty()) {
+    if e.variants.len() < 2
+        || e.variants
+            .iter()
+            .any(|v| !v.attrs.is_empty() || matches!(v.fields, Fields::Unit))
+    {
         return None;
     }
     let mut entries = Vec::with_capacity(e.variants.len());
     for v in &e.variants {
         let (lo, hi) = byte_range_for_span(text, v.span())?;
         entries.push(SortableSpan {
-            lo,
             hi,
+            lo,
             name: v.ident.to_string(),
+            bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
         });
     }
     single_line_entries(entries)
