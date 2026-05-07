@@ -462,7 +462,7 @@ levels**:
   `U { ... }`, and `E::V { ... }` are reordered by the same rule.
   Functional-update tails (`..base`) stay at the end.
 
-The rules in all four cases:
+The grouping order is the same in all four cases:
 
 1. **Group** by the identifier's first "word":
    - For snake_case: text up to the first `_` (`foo_bar` → `foo`).
@@ -475,8 +475,6 @@ The rules in all four cases:
 3. **Between groups**: order ascending by the group's **mean
    name length** (sum of all member names' lengths / member count).
    Ties preserve source order.
-4. A **blank line** separates consecutive groups; within a group
-   fields stay packed together.
 
 Worked example (input on the left, output on the right):
 
@@ -506,6 +504,10 @@ Single-line lists use a byte/span-level pass by default for shapes like
 the list on one line and does not insert blank separators. Pass
 `--no-single-line-fields` to leave same-line field lists
 verbatim while keeping the multi-line field pass enabled.
+
+Multi-line field-like lists preserve existing blank lines and do not
+add group separators. If a field with leading blank lines sorts to the
+front, those leading blank lines are dropped.
 
 Function parameters are not reordered by default. Pass
 `--fn-args` to apply the same grouping rule to single-line and

@@ -1,8 +1,9 @@
 //! Field-group-sort feature: groups named fields/variants by their
 //! first word (snake_case `_` separator OR camelCase / PascalCase
 //! boundary), sorts within group by name length, and orders groups
-//! by the group's mean name length, with a blank line between
-//! groups. Default ON; opt-out with `Config { no_fields:
+//! by the group's mean name length. Existing blank lines before a
+//! field move with that field, but field sorting does not add new
+//! blank lines between groups. Default ON; opt-out with `Config { no_fields:
 //! true, ..default }`.
 //!
 //! Skip rules (item left untouched):
@@ -258,7 +259,6 @@ enum E {
     Foo,
     FooLong,
     FooMedium,
-
     BarApple,
     BarBanana,
 }
@@ -329,8 +329,8 @@ pub enum Color {
 #[test]
 fn nameless_prefix_each_in_own_group() {
     // Field names with no `_` and no PascalCase boundary form
-    // single-name groups — each is its own group, so each gets a
-    // blank line between it and its neighbours.
+    // single-name groups. Field sorting does not synthesize blank
+    // lines between those groups.
     let input = "\
 struct S {
     a: u8,
@@ -346,10 +346,10 @@ struct S {
     let p_c = out.find("c: u32").unwrap();
     let p_b = out.find("bb: u16").unwrap();
     assert!(p_a < p_c && p_c < p_b, "{out}");
-    // Blank lines between each group.
+    // No blank lines are inserted between groups.
     let block = &out[p_a..=p_b + 7];
     let blanks = block.matches("\n\n").count();
-    assert!(blanks >= 2, "expected >= 2 blank-line separators:\n{out}");
+    assert_eq!(blanks, 0, "unexpected blank-line separators:\n{out}");
 }
 #[test]
 fn attributes_travel_with_their_field() {
@@ -440,11 +440,12 @@ struct S {
     let p_bar = out.find("bar:").unwrap();
     let p_foo = out.find("foo:").unwrap();
     assert!(p_bar < p_foo, "{out}");
-    // Different prefixes => blank line between them.
+    // Different prefixes reorder, but field sorting does not insert a
+    // blank line between them.
     let between = &out[p_bar..p_foo];
     assert!(
-        between.contains("\n\n"),
-        "blank line between groups:\n{out}"
+        !between.contains("\n\n"),
+        "unexpected blank line between groups:\n{out}"
     );
 }
 
@@ -489,7 +490,6 @@ struct S {
 struct S {
     bar_x: u8,
     bar_y: u32,
-
     foo_short: u8,
     foo_medium: bool,
     foo_loooong: String,
@@ -537,7 +537,7 @@ fn make() -> S {
 ";
     let out = reorder_source(input).unwrap();
     assert!(
-        out.contains("S {\n        bar: 2,\n\n        foo_z: 1,\n        foo_a: true,\n    }"),
+        out.contains("S {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
         "{out}"
     );
 }
@@ -563,7 +563,7 @@ fn make() -> E {
 ";
     let out = reorder_source(input).unwrap();
     assert!(
-        out.contains("E::V {\n        bar: 2,\n\n        foo_z: 1,\n        foo_a: true,\n    }"),
+        out.contains("E::V {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
         "{out}"
     );
 }
@@ -587,7 +587,7 @@ fn make() -> U {
 ";
     let out = reorder_source(input).unwrap();
     assert!(
-        out.contains("U {\n        bar: 2,\n\n        foo_z: 1,\n        foo_a: true,\n    }"),
+        out.contains("U {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
         "{out}"
     );
 }
@@ -612,7 +612,7 @@ fn make(base: S, foo_z: u8, bar: u32, foo_a: bool) -> S {
 ";
     let out = reorder_source(input).unwrap();
     assert!(
-        out.contains("S {\n        bar,\n\n        foo_z,\n        foo_a,\n        ..base\n    }"),
+        out.contains("S {\n        bar,\n        foo_z,\n        foo_a,\n        ..base\n    }"),
         "{out}"
     );
 }
@@ -647,7 +647,7 @@ fn make() -> Outer {
     let out = reorder_source(input).unwrap();
     assert!(
         out.contains(
-            "Outer {\n        bar: 3,\n\n        foo_z: Inner {\n            bar: 2,\n\n            foo_z: 1,\n            foo_a: true,\n        },\n        foo_a: false,\n    }"
+            "Outer {\n        bar: 3,\n        foo_z: Inner {\n            bar: 2,\n            foo_z: 1,\n            foo_a: true,\n        },\n        foo_a: false,\n    }"
         ),
         "{out}"
     );
@@ -698,24 +698,18 @@ fn make() -> S {
     let want = "\
 struct S {
     a: u8,
-
     bb: u8,
-
     user_id: u64,
     user_name: String,
-
     cache_path: String,
 }
 
 fn make() -> S {
     S {
         a: 0,
-
         bb: 2,
-
         user_id: 1,
         user_name: String::new(),
-
         cache_path: String::new(),
     }
 }
@@ -747,7 +741,6 @@ fn make() -> S {
     let want = "\
 struct S {
     bar: u32,
-
     foo_z: u8,
     foo_a: bool,
 }
@@ -756,7 +749,6 @@ fn make() -> S {
     S {
         // bar comment
         bar: 2,
-
         // z comment
         foo_z: 1,
         // a comment
@@ -793,7 +785,6 @@ fn make() {
     let want = "\
 struct S {
     bar: u32,
-
     foo_z: u8,
     foo_a: bool,
 }
@@ -801,13 +792,11 @@ struct S {
 fn make() {
     consume(S {
         bar: 2,
-
         foo_z: 1,
         foo_a: true,
     });
     let _items = [S {
         bar: 4,
-
         foo_z: 3,
         foo_a: false,
     }];
@@ -832,7 +821,6 @@ fn make() -> S {
     let want = "\
 struct S {
     bar: u32,
-
     foo_long: u8,
 }
 
@@ -981,6 +969,84 @@ fn make(
 ) {}
 ";
     let out = reorder_source_with(input, &fn_args_on()).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn field_reorder_preserves_existing_blank_separators() {
+    let input = "\
+struct S {
+    foo: bool,
+
+    foo_long: u8,
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+
+        foo_long: 1,
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+
+        foo_long: 1,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn field_reorder_drops_blank_before_first_sorted_field() {
+    let input = "\
+struct S {
+    foo: bool,
+    foo_long: u8,
+
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+        foo_long: 1,
+
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+        foo_long: 1,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
     assert_eq!(out, want);
 }
 

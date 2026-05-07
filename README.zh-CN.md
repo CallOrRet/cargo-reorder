@@ -343,7 +343,7 @@ cargo build --release --bin sample-stats
 - **`impl` / `trait` 块内部**：成员按与顶层一致的分类顺序排——`const` → `type` → `fn` → `async fn`，每一类内部再用前缀分组 + 长度规则。宏 / verbatim 成员是硬屏障，整个 body 保持源序
 - **struct 初始化表达式**：`S { ... }`、`U { ... }`、`E::V { ... }` 内的具名字段也按同一规则重排。functional update 的 `..base` 保持在末尾
 
-四个层面共用的规则：
+四个层面共用同一套分组顺序：
 
 1. **按"首词"分组**：
    - snake_case：取第一个 `_` 之前的串（`foo_bar` → `foo`）
@@ -351,7 +351,6 @@ cargo build --release --bin sample-stats
    - 没有 `_` 也没有大小写转折的（`Foo`、`BAR`、`XMLParser`）自成一组
 2. **组内**按名字长度升序，短的在前（`bar_x` 在 `bar_long_name` 之前），同长度按原顺序
 3. **组间**按**该组的平均名字长度**升序（所有成员名字长度的算数平均），同长度按原顺序
-4. 不同组之间插入**一个空行**，组内字段紧贴
 
 示例（左为输入，右为输出）：
 
@@ -369,6 +368,8 @@ struct Foo {                  struct Foo {
 加 `--no-fields` 同时关掉四层 —— 顶层 item 退回到"按 category，组内保留源序"，每个 `struct` / `union` / `enum` 的内部保持原样，每个 `impl` / `trait` body 和 struct 初始化表达式也保持原样。如果只想保留 `impl` / `trait` body 的源序、其他层照常排（比如方法是 builder 链、有特定调用顺序），用更精准的 `--no-impl-fns`。
 
 单行字段列表默认也会用 byte/span 级 pass 处理，例如 `struct S { b: u8, a: u8 }`、`S { b: 1, a: 2 }`；输出仍保持单行，不插入空行分隔。加 `--no-single-line-fields` 可以只关闭这部分单行字段重排，同时保留多行字段重排。
+
+多行字段类列表会保留已有空行，但不会新增组间空行。如果带有前置空行的字段被排到第一位，这些前置空行会被删除。
 
 函数参数默认不重排。加 `--fn-args` 后，单行和多行参数列表都会使用同一套分组规则；第一个 receiver 参数（`self`、`mut self`、`&self`、`&mut self`）固定在最前面，其余普通 ident 参数会参与重排。多行签名会保留已有空行，但不会新增组间空行。
 

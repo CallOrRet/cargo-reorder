@@ -11,8 +11,8 @@
 //!   name length** (sum of names / member count). Ties between
 //!   groups preserve source order — whichever group's first member
 //!   appeared earliest in the source goes first.
-//! - A blank line is inserted between consecutive groups. Within a
-//!   group, fields stay packed.
+//! - Existing blank lines before a field move with that field. Field
+//!   sorting does not add blank separators between groups.
 //!
 //! Skip rules — when any of these apply, the item is left exactly as
 //! the user wrote it. Reordering would change ABI, layout, or
@@ -155,6 +155,9 @@ fn member_entry(
 /// Returns the reordered text. Lines outside the entries' ranges
 /// (header, closing brace, comments before/after the field block) are
 /// preserved.
+///
+/// Field-like callers keep existing blank lines with the field that
+/// follows them but do not synthesize new blank lines between groups.
 #[derive(Clone, Copy)]
 struct LineSortOptions {
     include_leading_blank_lines: bool,
@@ -175,6 +178,21 @@ where
     I: IntoIterator<Item = SortableLines>,
 {
     sort_top_level_with_options(text, text_start_line, entries, LineSortOptions::default())
+}
+
+fn sort_field_like_top_level<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
+where
+    I: IntoIterator<Item = SortableLines>,
+{
+    sort_top_level_with_options(
+        text,
+        text_start_line,
+        entries,
+        LineSortOptions {
+            include_leading_blank_lines: true,
+            insert_blank_lines_between_groups: false,
+        },
+    )
 }
 
 fn sort_top_level_with_options<I>(
@@ -258,7 +276,8 @@ where
 
     // Header: lines [0, first_field_line). Footer: lines
     // (last_field_line, end]. Body becomes the reordered concatenation
-    // of each entry's slice plus an additional blank line between groups.
+    // of each entry's slice. Some callers insert an additional blank
+    // line between groups.
     let mut header: String = lines[..first_field_line].concat();
     let footer: String = lines[last_field_line + 1..].concat();
 
@@ -308,17 +327,24 @@ where
         .map(|i| std::mem::take(&mut groups[i]))
         .collect();
 
-    // Emit: each entry's slice (which already ends with \n). Field and
-    // member callers insert a blank line between groups; function
-    // parameters use the same ordering rule without adding separators.
+    // Emit: each entry's slice (which already ends with \n). Some
+    // callers insert a blank line between groups; field-like and
+    // function-parameter callers preserve existing separators without
+    // adding new ones.
     let mut body = String::new();
     for (gi, g) in groups.iter().enumerate() {
         if options.insert_blank_lines_between_groups && gi > 0 {
             body.push('\n');
         }
-        for &i in g {
+        for (entry_idx, &i) in g.iter().enumerate() {
             let (lo, hi, _, _) = &ranges[i];
-            for line in &lines[*lo..=*hi] {
+            let mut line_lo = *lo;
+            if gi == 0 && entry_idx == 0 && options.include_leading_blank_lines {
+                while line_lo <= *hi && lines[line_lo].trim().is_empty() {
+                    line_lo += 1;
+                }
+            }
+            for line in &lines[line_lo..=*hi] {
                 body.push_str(line);
             }
         }
@@ -597,7 +623,7 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
     let parsed: ItemEnum = syn::parse_str(&out).ok()?;
     // serde-derive forces `#[serde(other)]` to be on the last variant;
     // pin that variant in place and reorder only its predecessors.
-    sort_top_level(
+    sort_field_like_top_level(
         &out,
         1,
         parsed.variants.iter().map(|v| {
@@ -681,7 +707,7 @@ fn rewrite_expr_struct(text: &str, text_start_line: usize, expr: &ExprStruct) ->
     {
         return None;
     }
-    sort_top_level(
+    sort_field_like_top_level(
         text,
         text_start_line,
         expr.fields.iter().map(|f| {
@@ -919,7 +945,7 @@ fn rewrite_named_fields_inplace(
         return None;
     }
     let last_idx = named.named.len() - 1;
-    sort_top_level(
+    sort_field_like_top_level(
         text,
         text_start_line,
         named.named.iter().enumerate().map(|(i, f)| {
