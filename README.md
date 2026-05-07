@@ -256,6 +256,7 @@ either): work at the package level instead.
 | `--no-import-groups` | don't split imports into std / external / crate |
 | `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
 | `--no-short-trait-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
+| `--no-trim-field-blanks` | preserve existing blank lines between reordered multi-line fields (default trims them; first-field leading blanks are always dropped) |
 | `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
 | `--no-single-line-fields` | preserve source order for same-line `struct` / `union` / `enum` fields and struct-literal fields (default reorders them in place) |
 | `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
@@ -505,9 +506,11 @@ the list on one line and does not insert blank separators. Pass
 `--no-single-line-fields` to leave same-line field lists
 verbatim while keeping the multi-line field pass enabled.
 
-Multi-line field-like lists preserve existing blank lines and do not
-add group separators. If a field with leading blank lines sorts to the
-front, those leading blank lines are dropped.
+Multi-line field-like lists trim existing blank lines between fields by
+default and do not add group separators. Pass `--no-trim-field-blanks`
+to keep original blank lines attached to the field that follows them.
+If a field with leading blank lines sorts to the front, those leading
+blank lines are always dropped.
 
 Function parameters are not reordered by default. Pass
 `--fn-args` to apply the same grouping rule to single-line and

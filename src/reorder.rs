@@ -254,11 +254,11 @@ pub struct Config {
     /// `enum` (and inside enum variants). When off, fields are grouped by
     /// their snake_case / PascalCase / camelCase first word, within each
     /// group sorted shortest-name-first, and the groups are emitted in
-    /// ascending order of the group's mean name length with a blank line
-    /// between them. ABI- and semantics-affecting shapes are always
-    /// skipped: any `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`,
-    /// enums whose any variant carries an explicit discriminant, and
-    /// tuple/unit variants.
+    /// ascending order of the group's mean name length. ABI- and
+    /// semantics-affecting shapes are always skipped: any
+    /// `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`, enums whose
+    /// any variant carries an explicit discriminant, and tuple/unit
+    /// variants.
     pub no_fields: bool,
     /// Disable the prefix-group + length sort applied **inside `impl`
     /// and `trait` bodies** (the const → type → fn → async fn category
@@ -285,6 +285,12 @@ pub struct Config {
     /// Disable ordering shorter trait paths first
     /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
     pub no_short_trait_first: bool,
+    /// Disable trimming existing blank lines between reordered
+    /// field-like entries. By default, multi-line field sorting removes
+    /// blank lines between fields; with this on, original blank lines
+    /// move with the following field. Blank lines before the first
+    /// emitted field are still removed.
+    pub no_trim_field_blanks: bool,
     /// Disable preserving `pub mod` / `mod` source order. With this
     /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
     /// blank-line separator between them.
@@ -571,12 +577,14 @@ fn reorder_inner(
             // still runs — that's a separate pass.
             body
         } else {
-            crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+            crate::fields::reorder_in_item(item, &body, start, cfg.no_trim_field_blanks)
+                .unwrap_or(body)
         };
         let body = if cfg.no_fields {
             body
         } else {
-            crate::fields::reorder_expr_structs_in_item_text(&body).unwrap_or(body)
+            crate::fields::reorder_expr_structs_in_item_text(&body, cfg.no_trim_field_blanks)
+                .unwrap_or(body)
         };
         let body = if cfg.no_fields || cfg.no_single_line_fields {
             body

@@ -121,9 +121,8 @@ struct Cli {
     /// `enum`. By default, fields are grouped by their first word
     /// (snake_case `_` separator or PascalCase / camelCase boundary);
     /// within each group sorted shortest-first; groups emitted in
-    /// ascending order of the group's mean name length with a blank
-    /// line between them. ABI- and semantics-affecting shapes are
-    /// always skipped (see README).
+    /// ascending order of the group's mean name length. ABI- and
+    /// semantics-affecting shapes are always skipped (see README).
     #[arg(long)]
     no_fields: bool,
     /// Disable the prefix-group + length sort applied inside `impl`
@@ -163,6 +162,11 @@ struct Cli {
     /// when both target the same type and classify identically.
     #[arg(long)]
     no_short_trait_first: bool,
+    /// Preserve existing blank lines between reordered multi-line
+    /// field-like entries. By default those blank lines are trimmed.
+    /// Blank lines before the first emitted field are always trimmed.
+    #[arg(long)]
+    no_trim_field_blanks: bool,
     /// Disable preserving `pub mod` / `mod` source order. With this
     /// on, `pub mod` items are sorted before private `mod` items with
     /// a blank line between the two groups. Default is to preserve
@@ -196,6 +200,7 @@ impl Cli {
             no_import_groups: self.no_import_groups,
             no_mod_before_use: self.no_mod_before_use,
             no_short_trait_first: self.no_short_trait_first,
+            no_trim_field_blanks: self.no_trim_field_blanks,
             no_preserve_mod_order: self.no_preserve_mod_order,
             no_single_line_fields: self.no_single_line_fields,
             no_trait_before_struct: self.no_trait_before_struct,

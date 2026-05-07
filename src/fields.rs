@@ -156,12 +156,14 @@ fn member_entry(
 /// (header, closing brace, comments before/after the field block) are
 /// preserved.
 ///
-/// Field-like callers keep existing blank lines with the field that
-/// follows them but do not synthesize new blank lines between groups.
+/// Callers can choose whether blank lines before entries move with the
+/// following entry. No caller synthesizes separators unless
+/// `insert_blank_lines_between_groups` is enabled.
 #[derive(Clone, Copy)]
 struct LineSortOptions {
     include_leading_blank_lines: bool,
     insert_blank_lines_between_groups: bool,
+    trim_first_leading_blank_lines: bool,
 }
 
 impl Default for LineSortOptions {
@@ -169,6 +171,7 @@ impl Default for LineSortOptions {
         Self {
             include_leading_blank_lines: false,
             insert_blank_lines_between_groups: true,
+            trim_first_leading_blank_lines: false,
         }
     }
 }
@@ -180,7 +183,12 @@ where
     sort_top_level_with_options(text, text_start_line, entries, LineSortOptions::default())
 }
 
-fn sort_field_like_top_level<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
+fn sort_field_like_top_level<I>(
+    text: &str,
+    text_start_line: usize,
+    entries: I,
+    preserve_blank_lines: bool,
+) -> Option<String>
 where
     I: IntoIterator<Item = SortableLines>,
 {
@@ -189,8 +197,9 @@ where
         text_start_line,
         entries,
         LineSortOptions {
-            include_leading_blank_lines: true,
+            include_leading_blank_lines: preserve_blank_lines,
             insert_blank_lines_between_groups: false,
+            trim_first_leading_blank_lines: true,
         },
     )
 }
@@ -339,7 +348,7 @@ where
         for (entry_idx, &i) in g.iter().enumerate() {
             let (lo, hi, _, _) = &ranges[i];
             let mut line_lo = *lo;
-            if gi == 0 && entry_idx == 0 && options.include_leading_blank_lines {
+            if gi == 0 && entry_idx == 0 && options.trim_first_leading_blank_lines {
                 while line_lo <= *hi && lines[line_lo].trim().is_empty() {
                     line_lo += 1;
                 }
@@ -368,11 +377,16 @@ where
 /// Top-level entry point: given a parsed item and its raw source text,
 /// return a rewritten version with fields/variants reordered, or
 /// `None` if no rewrite was performed.
-pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -> Option<String> {
+pub(crate) fn reorder_in_item(
+    item: &Item,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     match item {
-        Item::Struct(s) => rewrite_struct(s, body_text, start_line),
-        Item::Union(u) => rewrite_union(u, body_text, start_line),
-        Item::Enum(e) => rewrite_enum(e, body_text, start_line),
+        Item::Struct(s) => rewrite_struct(s, body_text, start_line, preserve_field_blank_lines),
+        Item::Union(u) => rewrite_union(u, body_text, start_line, preserve_field_blank_lines),
+        Item::Enum(e) => rewrite_enum(e, body_text, start_line, preserve_field_blank_lines),
         Item::Impl(i) => rewrite_impl(i, body_text, start_line),
         Item::Trait(t) => rewrite_trait(t, body_text, start_line),
         _ => None,
@@ -384,7 +398,10 @@ pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -
 /// declaration fields. The caller passes one complete item body; we
 /// re-parse after each successful rewrite so nested literals are handled
 /// from the inside out without stale spans.
-pub(crate) fn reorder_expr_structs_in_item_text(body_text: &str) -> Option<String> {
+pub(crate) fn reorder_expr_structs_in_item_text(
+    body_text: &str,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     let mut out = body_text.to_string();
     let mut changed = false;
 
@@ -399,7 +416,8 @@ pub(crate) fn reorder_expr_structs_in_item_text(body_text: &str) -> Option<Strin
 
         let mut rewrote_one = false;
         for expr in collector.exprs {
-            if let Some(rewritten) = rewrite_expr_struct(&out, 1, &expr) {
+            if let Some(rewritten) = rewrite_expr_struct(&out, 1, &expr, preserve_field_blank_lines)
+            {
                 if rewritten != out {
                     out = rewritten;
                     changed = true;
@@ -579,7 +597,12 @@ fn rewrite_impl(item: &ItemImpl, body_text: &str, start_line: usize) -> Option<S
     )
 }
 
-fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_enum(
+    e: &ItemEnum,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&e.attrs) {
         return None;
     }
@@ -598,9 +621,13 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
             let line_range = field_block_line_range(&out, start_line, named);
             if let Some((line_lo, line_hi)) = line_range {
                 let block_text = lines_slice(&out, start_line, line_lo, line_hi);
-                if let Some(rewritten) =
-                    rewrite_named_fields_inplace(&block_text, line_lo, named, false)
-                {
+                if let Some(rewritten) = rewrite_named_fields_inplace(
+                    &block_text,
+                    line_lo,
+                    named,
+                    false,
+                    preserve_field_blank_lines,
+                ) {
                     let (lo_byte, hi_byte) =
                         byte_range_for_line_range(&out, start_line, line_lo, line_hi);
                     variant_rewrites.push((lo_byte, hi_byte, rewritten));
@@ -641,15 +668,27 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
                 bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
             }
         }),
+        preserve_field_blank_lines,
     )
 }
 
-fn rewrite_union(u: &ItemUnion, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_union(
+    u: &ItemUnion,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&u.attrs) {
         return None;
     }
     let pin_last = has_unsized_generic(&u.generics);
-    rewrite_named_fields_inplace(body_text, start_line, &u.fields, pin_last)
+    rewrite_named_fields_inplace(
+        body_text,
+        start_line,
+        &u.fields,
+        pin_last,
+        preserve_field_blank_lines,
+    )
 }
 
 fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option<String> {
@@ -681,7 +720,12 @@ fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option
     )
 }
 
-fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_struct(
+    s: &ItemStruct,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&s.attrs) {
         return None;
     }
@@ -693,10 +737,21 @@ fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<
     // compile otherwise), so pin the last named field in place and let
     // the rest reorder normally.
     let pin_last = has_unsized_generic(&s.generics);
-    rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
+    rewrite_named_fields_inplace(
+        body_text,
+        start_line,
+        named,
+        pin_last,
+        preserve_field_blank_lines,
+    )
 }
 
-fn rewrite_expr_struct(text: &str, text_start_line: usize, expr: &ExprStruct) -> Option<String> {
+fn rewrite_expr_struct(
+    text: &str,
+    text_start_line: usize,
+    expr: &ExprStruct,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if expr.fields.len() < 2 {
         return None;
     }
@@ -728,6 +783,7 @@ fn rewrite_expr_struct(text: &str, text_start_line: usize, expr: &ExprStruct) ->
                 bucket: 0,
             }
         }),
+        preserve_field_blank_lines,
     )
 }
 
@@ -837,6 +893,7 @@ fn rewrite_signature_args(text: &str, sig: &Signature) -> Option<String> {
             LineSortOptions {
                 include_leading_blank_lines: true,
                 insert_blank_lines_between_groups: false,
+                trim_first_leading_blank_lines: false,
             },
         )
     })
@@ -940,6 +997,7 @@ fn rewrite_named_fields_inplace(
     text_start_line: usize,
     named: &FieldsNamed,
     pin_last: bool,
+    preserve_field_blank_lines: bool,
 ) -> Option<String> {
     if named.named.len() < 2 {
         return None;
@@ -967,6 +1025,7 @@ fn rewrite_named_fields_inplace(
                 },
             }
         }),
+        preserve_field_blank_lines,
     )
 }
 

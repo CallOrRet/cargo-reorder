@@ -1,10 +1,10 @@
 //! Field-group-sort feature: groups named fields/variants by their
 //! first word (snake_case `_` separator OR camelCase / PascalCase
 //! boundary), sorts within group by name length, and orders groups
-//! by the group's mean name length. Existing blank lines before a
-//! field move with that field, but field sorting does not add new
-//! blank lines between groups. Default ON; opt-out with `Config { no_fields:
-//! true, ..default }`.
+//! by the group's mean name length. Field sorting trims existing blank
+//! lines between fields by default; `Config { no_trim_field_blanks: true,
+//! ..default }` preserves them with the following field. Default ON;
+//! opt-out with `Config { no_fields: true, ..default }`.
 //!
 //! Skip rules (item left untouched):
 //! - any `#[repr(...)]`
@@ -973,7 +973,45 @@ fn make(
 }
 
 #[test]
-fn field_reorder_preserves_existing_blank_separators() {
+fn field_reorder_trims_existing_blank_separators_by_default() {
+    let input = "\
+struct S {
+    foo: bool,
+
+    foo_long: u8,
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+
+        foo_long: 1,
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+        foo_long: 1,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn no_trim_field_blanks_preserves_existing_blank_separators() {
     let input = "\
 struct S {
     foo: bool,
@@ -1008,7 +1046,11 @@ fn make() -> S {
     }
 }
 ";
-    let out = reorder_source(input).unwrap();
+    let cfg = Config {
+        no_trim_field_blanks: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
     assert_eq!(out, want);
 }
 
@@ -1047,6 +1089,48 @@ fn make() -> S {
 }
 ";
     let out = reorder_source(input).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn no_trim_field_blanks_still_drops_blank_before_first_sorted_field() {
+    let input = "\
+struct S {
+    foo: bool,
+    foo_long: u8,
+
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+        foo_long: 1,
+
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+        foo_long: 1,
+    }
+}
+";
+    let cfg = Config {
+        no_trim_field_blanks: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
     assert_eq!(out, want);
 }
 

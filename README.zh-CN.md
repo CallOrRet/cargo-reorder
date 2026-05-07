@@ -206,6 +206,7 @@ mod tests {
 | `--no-import-groups` | 不分 std / external / crate 三组 |
 | `--no-mod-before-use` | `use` 排在 `mod` 之前（默认 mod 在前，见「关于 `--no-mod-before-use`」） |
 | `--no-short-trait-first` | 不让短 trait 路径优先排序（默认开启，例如 `impl Default for Foo` 排在 `impl std::default::Default for Foo` 之前） |
+| `--no-trim-field-blanks` | 保留多行字段重排时原本存在的字段间空行（默认删除；排到第一位的字段前置空行始终删除） |
 | `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
 | `--no-single-line-fields` | 保留单行 `struct` / `union` / `enum` 字段、struct 初始化字段的源序（默认会原地重排） |
 | `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
@@ -369,7 +370,7 @@ struct Foo {                  struct Foo {
 
 单行字段列表默认也会用 byte/span 级 pass 处理，例如 `struct S { b: u8, a: u8 }`、`S { b: 1, a: 2 }`；输出仍保持单行，不插入空行分隔。加 `--no-single-line-fields` 可以只关闭这部分单行字段重排，同时保留多行字段重排。
 
-多行字段类列表会保留已有空行，但不会新增组间空行。如果带有前置空行的字段被排到第一位，这些前置空行会被删除。
+多行字段类列表默认会删除字段之间已有的空行，并且不会新增组间空行。加 `--no-trim-field-blanks` 后，原有空行会跟随其后的字段一起移动。如果带有前置空行的字段被排到第一位，这些前置空行始终会被删除。
 
 函数参数默认不重排。加 `--fn-args` 后，单行和多行参数列表都会使用同一套分组规则；第一个 receiver 参数（`self`、`mut self`、`&self`、`&mut self`）固定在最前面，其余普通 ident 参数会参与重排。多行签名会保留已有空行，但不会新增组间空行。
 
