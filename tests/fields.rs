@@ -15,39 +15,6 @@
 
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
-fn opt_out() -> Config {
-    Config {
-        no_fields: true,
-        ..Config::default()
-    }
-}
-
-fn single_line_off() -> Config {
-    Config {
-        no_single_line_fields: true,
-        ..Config::default()
-    }
-}
-
-fn fn_args_on() -> Config {
-    Config {
-        fn_args: true,
-        ..Config::default()
-    }
-}
-
-#[test]
-fn opt_out_preserves_source_order() {
-    let input = "\
-struct S {
-    foo_loooong: String,
-    bar_x: u8,
-}
-";
-    let out = reorder_source_with(input, &opt_out()).unwrap();
-    assert_eq!(out, input);
-}
-
 #[test]
 fn repr_c_skipped() {
     let input = "\
@@ -98,6 +65,46 @@ fn unit_struct_unaffected() {
 fn tuple_struct_unaffected() {
     let input = "struct T(u32, String, u8);\n";
     let out = reorder_source(input).unwrap();
+    assert_eq!(out, input);
+}
+
+fn opt_out() -> Config {
+    Config {
+        no_fields: true,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn opt_out_preserves_source_order() {
+    let input = "\
+struct S {
+    foo_loooong: String,
+    bar_x: u8,
+}
+";
+    let out = reorder_source_with(input, &opt_out()).unwrap();
+    assert_eq!(out, input);
+}
+
+#[test]
+fn opt_out_preserves_struct_init_order() {
+    let input = "\
+struct S {
+    bar: u32,
+    foo_z: u8,
+    foo_a: bool,
+}
+
+fn make() -> S {
+    S {
+        foo_z: 1,
+        bar: 2,
+        foo_a: true,
+    }
+}
+";
+    let out = reorder_source_with(input, &opt_out()).unwrap();
     assert_eq!(out, input);
 }
 
@@ -176,6 +183,30 @@ union U {
 }
 
 #[test]
+fn union_init_fields_reorder() {
+    let input = "\
+union U {
+    bar: u32,
+    foo_z: u8,
+    foo_a: bool,
+}
+
+fn make() -> U {
+    U {
+        foo_z: 1,
+        bar: 2,
+        foo_a: true,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains("U {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
+        "{out}"
+    );
+}
+
+#[test]
 fn union_fields_reorder_when_safe() {
     // Plain union without #[repr] — though unions are usually used
     // with #[repr(C)], a `union` without it (rare) is reorderable.
@@ -197,17 +228,6 @@ union U {
 #[test]
 fn empty_struct_body_unaffected() {
     let input = "struct E {}\n";
-    let out = reorder_source(input).unwrap();
-    assert_eq!(out, input);
-}
-
-#[test]
-fn single_field_struct_unaffected() {
-    let input = "\
-struct S {
-    only: u8,
-}
-";
     let out = reorder_source(input).unwrap();
     assert_eq!(out, input);
 }
@@ -279,6 +299,32 @@ enum E {
     assert_eq!(
         out, input,
         "enum with explicit discriminant must not reorder:\n{out}"
+    );
+}
+
+#[test]
+fn enum_variant_init_fields_reorder() {
+    let input = "\
+enum E {
+    V {
+        bar: u32,
+        foo_z: u8,
+        foo_a: bool,
+    },
+}
+
+fn make() -> E {
+    E::V {
+        foo_z: 1,
+        bar: 2,
+        foo_a: true,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains("E::V {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
+        "{out}"
     );
 }
 
@@ -389,26 +435,113 @@ struct S {
     );
 }
 
-#[test]
-fn inline_single_line_struct_reorders_by_default() {
-    let input = "struct S { foo_long: u8, bar: u32 }\n";
-    let out = reorder_source(input).unwrap();
-    assert_eq!(out, "struct S { bar: u32, foo_long: u8 }\n");
+fn fn_args_on() -> Config {
+    Config {
+        fn_args: true,
+        ..Config::default()
+    }
 }
 
 #[test]
-fn inline_struct_variant_inner_reorders_by_default() {
+fn fn_args_reorders_single_line_params() {
     let input = "\
-enum E {
-    BarThing { foo_z: u8, bar: u32, foo_a: bool },
-    FooThing,
+fn make(foo_long: u8, bar: u32, foo: bool) {}
+
+trait T {
+    fn make(foo_long: u8, bar: u32, foo: bool);
+}
+
+impl T for S {
+    fn make(foo_long: u8, bar: u32, foo: bool) {}
 }
 ";
+    let want = "\
+trait T {
+    fn make(bar: u32, foo: bool, foo_long: u8);
+}
+
+impl T for S {
+    fn make(bar: u32, foo: bool, foo_long: u8) {}
+}
+fn make(bar: u32, foo: bool, foo_long: u8) {}
+";
+    let out = reorder_source_with(input, &fn_args_on()).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn fn_args_keep_source_order_by_default() {
+    let input = "\
+fn make(foo_long: u8, bar: u32, foo: bool) {}
+
+trait T {
+    fn make(foo_long: u8, bar: u32, foo: bool);
+}
+
+impl T for S {
+    fn make(foo_long: u8, bar: u32, foo: bool) {}
+}
+";
+    let want = "\
+trait T {
+    fn make(foo_long: u8, bar: u32, foo: bool);
+}
+
+impl T for S {
+    fn make(foo_long: u8, bar: u32, foo: bool) {}
+}
+fn make(foo_long: u8, bar: u32, foo: bool) {}
+";
     let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("BarThing { bar: u32, foo_z: u8, foo_a: bool }"),
-        "{out}"
-    );
+    assert_eq!(out, want);
+}
+
+#[test]
+fn fn_args_preserves_existing_multiline_param_blanks() {
+    let input = "\
+fn make(
+    foo: bool,
+
+    foo_long: u8,
+    bar: u32,
+) {}
+";
+    let want = "\
+fn make(
+    bar: u32,
+    foo: bool,
+
+    foo_long: u8,
+) {}
+";
+    let out = reorder_source_with(input, &fn_args_on()).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn fn_args_reorders_multiline_params_and_keeps_receiver_first() {
+    let input = "\
+impl S {
+    fn make(
+        &mut self,
+        foo_long: u8,
+        bar: u32,
+        foo: bool,
+    ) {}
+}
+";
+    let want = "\
+impl S {
+    fn make(
+        &mut self,
+        bar: u32,
+        foo: bool,
+        foo_long: u8,
+    ) {}
+}
+";
+    let out = reorder_source_with(input, &fn_args_on()).unwrap();
+    assert_eq!(out, want);
 }
 
 #[test]
@@ -450,75 +583,6 @@ struct S {
 }
 
 #[test]
-fn group_order_uses_mean_length_not_first_member() {
-    // Group `aa`: aa_x (4), aa_loooong (9) → mean 6.5, first member 4.
-    // Group `bb`: bb_xx (5), bb_yy (5) → mean 5, first member 5.
-    //
-    // If groups were ordered by *first member's length*, `aa` (4)
-    // would precede `bb` (5). Under the mean rule, `bb` (mean 5)
-    // precedes `aa` (mean 6.5). This test pins the mean behaviour.
-    let input = "\
-struct S {
-    aa_x: u8,
-    aa_loooong: String,
-    bb_xx: u8,
-    bb_yy: u8,
-}
-";
-    let out = reorder_source(input).unwrap();
-    let p_bb = out.find("bb_xx").unwrap();
-    let p_aa = out.find("aa_x").unwrap();
-    assert!(
-        p_bb < p_aa,
-        "group `bb` (mean 5) must precede group `aa` (mean 6.5):\n{out}"
-    );
-}
-
-#[test]
-fn struct_groups_by_snake_prefix_and_sorts_by_length() {
-    let input = "\
-struct S {
-    foo_loooong: String,
-    bar_x: u8,
-    foo_short: u8,
-    foo_medium: bool,
-    bar_y: u32,
-}
-";
-    let out = reorder_source(input).unwrap();
-    let want = "\
-struct S {
-    bar_x: u8,
-    bar_y: u32,
-    foo_short: u8,
-    foo_medium: bool,
-    foo_loooong: String,
-}
-";
-    assert_eq!(out, want, "got:\n{out}");
-}
-
-#[test]
-fn multi_line_struct_variant_in_enum_reorders_inner_fields() {
-    let input = "\
-enum E {
-    BarThing {
-        foo_z: u8,
-        bar: u32,
-        foo_a: bool,
-    },
-    FooThing,
-}
-";
-    let out = reorder_source(input).unwrap();
-    // Inner fields of BarThing should be regrouped: bar, then foo_z, foo_a.
-    let p_bar = out.find("bar: u32,").unwrap();
-    let p_foo_z = out.find("foo_z").unwrap();
-    let p_foo_a = out.find("foo_a").unwrap();
-    assert!(p_bar < p_foo_z && p_foo_z < p_foo_a, "{out}");
-}
-
-#[test]
 fn struct_init_fields_reorder() {
     let input = "\
 struct S {
@@ -540,138 +604,6 @@ fn make() -> S {
         out.contains("S {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
         "{out}"
     );
-}
-
-#[test]
-fn enum_variant_init_fields_reorder() {
-    let input = "\
-enum E {
-    V {
-        bar: u32,
-        foo_z: u8,
-        foo_a: bool,
-    },
-}
-
-fn make() -> E {
-    E::V {
-        foo_z: 1,
-        bar: 2,
-        foo_a: true,
-    }
-}
-";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("E::V {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
-        "{out}"
-    );
-}
-
-#[test]
-fn union_init_fields_reorder() {
-    let input = "\
-union U {
-    bar: u32,
-    foo_z: u8,
-    foo_a: bool,
-}
-
-fn make() -> U {
-    U {
-        foo_z: 1,
-        bar: 2,
-        foo_a: true,
-    }
-}
-";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("U {\n        bar: 2,\n        foo_z: 1,\n        foo_a: true,\n    }"),
-        "{out}"
-    );
-}
-
-#[test]
-fn struct_init_shorthand_and_rest_reorder_fields_only() {
-    let input = "\
-struct S {
-    bar: u32,
-    foo_z: u8,
-    foo_a: bool,
-}
-
-fn make(base: S, foo_z: u8, bar: u32, foo_a: bool) -> S {
-    S {
-        foo_z,
-        bar,
-        foo_a,
-        ..base
-    }
-}
-";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains("S {\n        bar,\n        foo_z,\n        foo_a,\n        ..base\n    }"),
-        "{out}"
-    );
-}
-
-#[test]
-fn nested_struct_init_fields_reorder_inside_and_outside() {
-    let input = "\
-struct Inner {
-    bar: u32,
-    foo_z: u8,
-    foo_a: bool,
-}
-
-struct Outer {
-    bar: u32,
-    foo_z: Inner,
-    foo_a: bool,
-}
-
-fn make() -> Outer {
-    Outer {
-        foo_z: Inner {
-            foo_z: 1,
-            bar: 2,
-            foo_a: true,
-        },
-        bar: 3,
-        foo_a: false,
-    }
-}
-";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.contains(
-            "Outer {\n        bar: 3,\n        foo_z: Inner {\n            bar: 2,\n            foo_z: 1,\n            foo_a: true,\n        },\n        foo_a: false,\n    }"
-        ),
-        "{out}"
-    );
-}
-
-#[test]
-fn opt_out_preserves_struct_init_order() {
-    let input = "\
-struct S {
-    bar: u32,
-    foo_z: u8,
-    foo_a: bool,
-}
-
-fn make() -> S {
-    S {
-        foo_z: 1,
-        bar: 2,
-        foo_a: true,
-    }
-}
-";
-    let out = reorder_source_with(input, &opt_out()).unwrap();
-    assert_eq!(out, input);
 }
 
 #[test]
@@ -807,47 +739,70 @@ fn make() {
 }
 
 #[test]
-fn no_single_line_fields_keeps_struct_init_order() {
+fn struct_groups_by_snake_prefix_and_sorts_by_length() {
     let input = "\
 struct S {
-    bar: u32,
-    foo_long: u8,
-}
-
-fn make() -> S {
-    S { foo_long: 1, bar: 2 }
+    foo_loooong: String,
+    bar_x: u8,
+    foo_short: u8,
+    foo_medium: bool,
+    bar_y: u32,
 }
 ";
+    let out = reorder_source(input).unwrap();
     let want = "\
 struct S {
-    bar: u32,
-    foo_long: u8,
-}
-
-fn make() -> S {
-    S { foo_long: 1, bar: 2 }
+    bar_x: u8,
+    bar_y: u32,
+    foo_short: u8,
+    foo_medium: bool,
+    foo_loooong: String,
 }
 ";
-    let out = reorder_source_with(input, &single_line_off()).unwrap();
-    assert_eq!(out, want);
+    assert_eq!(out, want, "got:\n{out}");
 }
 
 #[test]
-fn single_line_reorders_struct_union_and_enum_definitions_by_default() {
+fn struct_init_shorthand_and_rest_reorder_fields_only() {
     let input = "\
-struct S { foo_long: u8, bar: u32 }
-union U { foo_long: u8, bar: u32 }
-enum E { FooLong, Bar }
-enum V { FooThing { foo_long: u8, bar: u32 }, Bar }
-";
-    let want = "\
-enum E { Bar, FooLong }
-enum V { Bar, FooThing { bar: u32, foo_long: u8 } }
-struct S { bar: u32, foo_long: u8 }
-union U { bar: u32, foo_long: u8 }
+struct S {
+    bar: u32,
+    foo_z: u8,
+    foo_a: bool,
+}
+
+fn make(base: S, foo_z: u8, bar: u32, foo_a: bool) -> S {
+    S {
+        foo_z,
+        bar,
+        foo_a,
+        ..base
+    }
+}
 ";
     let out = reorder_source(input).unwrap();
-    assert_eq!(out, want);
+    assert!(
+        out.contains("S {\n        bar,\n        foo_z,\n        foo_a,\n        ..base\n    }"),
+        "{out}"
+    );
+}
+
+fn single_line_off() -> Config {
+    Config {
+        no_single_line_fields: true,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn single_field_struct_unaffected() {
+    let input = "\
+struct S {
+    only: u8,
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, input);
 }
 
 #[test]
@@ -871,142 +826,109 @@ fn make(base: S, foo_long: u8, bar: u32, foo: bool) -> S {
 }
 
 #[test]
-fn fn_args_keep_source_order_by_default() {
+fn single_line_reorders_struct_union_and_enum_definitions_by_default() {
     let input = "\
-fn make(foo_long: u8, bar: u32, foo: bool) {}
-
-trait T {
-    fn make(foo_long: u8, bar: u32, foo: bool);
-}
-
-impl T for S {
-    fn make(foo_long: u8, bar: u32, foo: bool) {}
-}
+struct S { foo_long: u8, bar: u32 }
+union U { foo_long: u8, bar: u32 }
+enum E { FooLong, Bar }
+enum V { FooThing { foo_long: u8, bar: u32 }, Bar }
 ";
     let want = "\
-trait T {
-    fn make(foo_long: u8, bar: u32, foo: bool);
-}
-
-impl T for S {
-    fn make(foo_long: u8, bar: u32, foo: bool) {}
-}
-fn make(foo_long: u8, bar: u32, foo: bool) {}
+enum E { Bar, FooLong }
+enum V { Bar, FooThing { bar: u32, foo_long: u8 } }
+struct S { bar: u32, foo_long: u8 }
+union U { bar: u32, foo_long: u8 }
 ";
     let out = reorder_source(input).unwrap();
     assert_eq!(out, want);
 }
 
 #[test]
-fn fn_args_reorders_single_line_params() {
-    let input = "\
-fn make(foo_long: u8, bar: u32, foo: bool) {}
-
-trait T {
-    fn make(foo_long: u8, bar: u32, foo: bool);
-}
-
-impl T for S {
-    fn make(foo_long: u8, bar: u32, foo: bool) {}
-}
-";
-    let want = "\
-trait T {
-    fn make(bar: u32, foo: bool, foo_long: u8);
-}
-
-impl T for S {
-    fn make(bar: u32, foo: bool, foo_long: u8) {}
-}
-fn make(bar: u32, foo: bool, foo_long: u8) {}
-";
-    let out = reorder_source_with(input, &fn_args_on()).unwrap();
-    assert_eq!(out, want);
-}
-
-#[test]
-fn fn_args_reorders_multiline_params_and_keeps_receiver_first() {
-    let input = "\
-impl S {
-    fn make(
-        &mut self,
-        foo_long: u8,
-        bar: u32,
-        foo: bool,
-    ) {}
-}
-";
-    let want = "\
-impl S {
-    fn make(
-        &mut self,
-        bar: u32,
-        foo: bool,
-        foo_long: u8,
-    ) {}
-}
-";
-    let out = reorder_source_with(input, &fn_args_on()).unwrap();
-    assert_eq!(out, want);
-}
-
-#[test]
-fn fn_args_preserves_existing_multiline_param_blanks() {
-    let input = "\
-fn make(
-    foo: bool,
-
-    foo_long: u8,
-    bar: u32,
-) {}
-";
-    let want = "\
-fn make(
-    bar: u32,
-    foo: bool,
-
-    foo_long: u8,
-) {}
-";
-    let out = reorder_source_with(input, &fn_args_on()).unwrap();
-    assert_eq!(out, want);
-}
-
-#[test]
-fn field_reorder_trims_existing_blank_separators_by_default() {
+fn group_order_uses_mean_length_not_first_member() {
+    // Group `aa`: aa_x (4), aa_loooong (9) → mean 6.5, first member 4.
+    // Group `bb`: bb_xx (5), bb_yy (5) → mean 5, first member 5.
+    //
+    // If groups were ordered by *first member's length*, `aa` (4)
+    // would precede `bb` (5). Under the mean rule, `bb` (mean 5)
+    // precedes `aa` (mean 6.5). This test pins the mean behaviour.
     let input = "\
 struct S {
-    foo: bool,
-
-    foo_long: u8,
-    bar: u32,
-}
-
-fn make() -> S {
-    S {
-        foo: true,
-
-        foo_long: 1,
-        bar: 2,
-    }
-}
-";
-    let want = "\
-struct S {
-    bar: u32,
-    foo: bool,
-    foo_long: u8,
-}
-
-fn make() -> S {
-    S {
-        bar: 2,
-        foo: true,
-        foo_long: 1,
-    }
+    aa_x: u8,
+    aa_loooong: String,
+    bb_xx: u8,
+    bb_yy: u8,
 }
 ";
     let out = reorder_source(input).unwrap();
+    let p_bb = out.find("bb_xx").unwrap();
+    let p_aa = out.find("aa_x").unwrap();
+    assert!(
+        p_bb < p_aa,
+        "group `bb` (mean 5) must precede group `aa` (mean 6.5):\n{out}"
+    );
+}
+
+#[test]
+fn inline_single_line_struct_reorders_by_default() {
+    let input = "struct S { foo_long: u8, bar: u32 }\n";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, "struct S { bar: u32, foo_long: u8 }\n");
+}
+
+#[test]
+fn inline_struct_variant_inner_reorders_by_default() {
+    let input = "\
+enum E {
+    BarThing { foo_z: u8, bar: u32, foo_a: bool },
+    FooThing,
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains("BarThing { bar: u32, foo_z: u8, foo_a: bool }"),
+        "{out}"
+    );
+}
+
+#[test]
+fn no_fields_disables_single_line_reorder() {
+    let input = "\
+struct S { foo_long: u8, bar: u32 }
+
+fn make(foo_long: u8, bar: u32) -> S {
+    S { foo_long: 1, bar: 2 }
+}
+";
+    let cfg = Config {
+        no_fields: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    assert_eq!(out, input);
+}
+#[test]
+fn no_single_line_fields_keeps_struct_init_order() {
+    let input = "\
+struct S {
+    bar: u32,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S { foo_long: 1, bar: 2 }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S { foo_long: 1, bar: 2 }
+}
+";
+    let out = reorder_source_with(input, &single_line_off()).unwrap();
     assert_eq!(out, want);
 }
 
@@ -1055,44 +977,6 @@ fn make() -> S {
 }
 
 #[test]
-fn field_reorder_drops_blank_before_first_sorted_field() {
-    let input = "\
-struct S {
-    foo: bool,
-    foo_long: u8,
-
-    bar: u32,
-}
-
-fn make() -> S {
-    S {
-        foo: true,
-        foo_long: 1,
-
-        bar: 2,
-    }
-}
-";
-    let want = "\
-struct S {
-    bar: u32,
-    foo: bool,
-    foo_long: u8,
-}
-
-fn make() -> S {
-    S {
-        bar: 2,
-        foo: true,
-        foo_long: 1,
-    }
-}
-";
-    let out = reorder_source(input).unwrap();
-    assert_eq!(out, want);
-}
-
-#[test]
 fn no_trim_field_blanks_still_drops_blank_before_first_sorted_field() {
     let input = "\
 struct S {
@@ -1135,18 +1019,133 @@ fn make() -> S {
 }
 
 #[test]
-fn no_fields_disables_single_line_reorder() {
+fn nested_struct_init_fields_reorder_inside_and_outside() {
     let input = "\
-struct S { foo_long: u8, bar: u32 }
+struct Inner {
+    bar: u32,
+    foo_z: u8,
+    foo_a: bool,
+}
 
-fn make(foo_long: u8, bar: u32) -> S {
-    S { foo_long: 1, bar: 2 }
+struct Outer {
+    bar: u32,
+    foo_z: Inner,
+    foo_a: bool,
+}
+
+fn make() -> Outer {
+    Outer {
+        foo_z: Inner {
+            foo_z: 1,
+            bar: 2,
+            foo_a: true,
+        },
+        bar: 3,
+        foo_a: false,
+    }
 }
 ";
-    let cfg = Config {
-        no_fields: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
-    assert_eq!(out, input);
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.contains(
+            "Outer {\n        bar: 3,\n        foo_z: Inner {\n            bar: 2,\n            foo_z: 1,\n            foo_a: true,\n        },\n        foo_a: false,\n    }"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn field_reorder_drops_blank_before_first_sorted_field() {
+    let input = "\
+struct S {
+    foo: bool,
+    foo_long: u8,
+
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+        foo_long: 1,
+
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+        foo_long: 1,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn field_reorder_trims_existing_blank_separators_by_default() {
+    let input = "\
+struct S {
+    foo: bool,
+
+    foo_long: u8,
+    bar: u32,
+}
+
+fn make() -> S {
+    S {
+        foo: true,
+
+        foo_long: 1,
+        bar: 2,
+    }
+}
+";
+    let want = "\
+struct S {
+    bar: u32,
+    foo: bool,
+    foo_long: u8,
+}
+
+fn make() -> S {
+    S {
+        bar: 2,
+        foo: true,
+        foo_long: 1,
+    }
+}
+";
+    let out = reorder_source(input).unwrap();
+    assert_eq!(out, want);
+}
+
+#[test]
+fn multi_line_struct_variant_in_enum_reorders_inner_fields() {
+    let input = "\
+enum E {
+    BarThing {
+        foo_z: u8,
+        bar: u32,
+        foo_a: bool,
+    },
+    FooThing,
+}
+";
+    let out = reorder_source(input).unwrap();
+    // Inner fields of BarThing should be regrouped: bar, then foo_z, foo_a.
+    let p_bar = out.find("bar: u32,").unwrap();
+    let p_foo_z = out.find("foo_z").unwrap();
+    let p_foo_a = out.find("foo_a").unwrap();
+    assert!(p_bar < p_foo_z && p_foo_z < p_foo_a, "{out}");
 }

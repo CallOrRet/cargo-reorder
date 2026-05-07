@@ -20,22 +20,6 @@ impl Display for Foo {}
 }
 
 #[test]
-fn impls_anchor_to_their_target_type() {
-    let input = "\
-struct A;
-struct B;
-impl B { fn b() {} }
-impl A { fn a() {} }
-";
-    let out = reorder_source(input).unwrap();
-    let p_a = out.find("struct A;").unwrap();
-    let p_impl_a = out.find("impl A").unwrap();
-    let p_b = out.find("struct B;").unwrap();
-    let p_impl_b = out.find("impl B").unwrap();
-    assert!(p_a < p_impl_a && p_impl_a < p_b && p_b < p_impl_b, "{out}");
-}
-
-#[test]
 fn std_via_renamed_use_import_recognised() {
     let input = "\
 use std::fmt::Display as Disp;
@@ -49,6 +33,22 @@ impl Disp for Foo {}
         out.find("impl Disp").unwrap() < out.find("impl other::Trait").unwrap(),
         "{out}"
     );
+}
+
+#[test]
+fn impls_anchor_to_their_target_type() {
+    let input = "\
+struct A;
+struct B;
+impl B { fn b() {} }
+impl A { fn a() {} }
+";
+    let out = reorder_source(input).unwrap();
+    let p_a = out.find("struct A;").unwrap();
+    let p_impl_a = out.find("impl A").unwrap();
+    let p_b = out.find("struct B;").unwrap();
+    let p_impl_b = out.find("impl B").unwrap();
+    assert!(p_a < p_impl_a && p_impl_a < p_b && p_b < p_impl_b, "{out}");
 }
 
 #[test]
@@ -81,6 +81,47 @@ struct Other;
     let p_orphan = out.find("impl std::fmt::Display").unwrap();
     let p_fn = out.find("fn z()").unwrap();
     assert!(p_struct < p_orphan && p_orphan < p_fn, "{out}");
+}
+
+#[test]
+fn short_trait_first_can_be_disabled() {
+    // With the flag off, the two impls tie on every sort key field and
+    // fall through to original_index — i.e. preserve source order.
+    let input = "\
+struct Foo;
+impl std::default::Default for Foo { fn default() -> Self { Foo } }
+impl Default for Foo { fn default() -> Self { Foo } }
+";
+    let cfg = Config {
+        no_short_trait_first: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
+    let p_long = out.find("impl std::default::Default for Foo").unwrap();
+    let p_short = out.find("impl Default for Foo").unwrap();
+    assert!(
+        p_long < p_short,
+        "with flag off, source order should be preserved:\n{out}"
+    );
+}
+#[test]
+fn short_trait_path_sorts_before_long_path() {
+    // `impl Default for Foo` and `impl std::default::Default for Foo`
+    // classify identically (Default is a prelude trait → StdTrait, and
+    // `std::...` also classifies as StdTrait). With the default
+    // `short_trait_first` on, the unqualified form sorts first.
+    let input = "\
+struct Foo;
+impl std::default::Default for Foo { fn default() -> Self { Foo } }
+impl Default for Foo { fn default() -> Self { Foo } }
+";
+    let out = reorder_source(input).unwrap();
+    let p_short = out.find("impl Default for Foo").unwrap();
+    let p_long = out.find("impl std::default::Default for Foo").unwrap();
+    assert!(
+        p_short < p_long,
+        "shorter trait path must precede the qualified form:\n{out}"
+    );
 }
 
 #[test]
@@ -128,47 +169,6 @@ impl Greet for String { fn greet(&self) {} }
         "trait then both impls:\n{out}"
     );
     assert!(p_impl_str < p_fn, "trait+impls block before fn:\n{out}");
-}
-
-#[test]
-fn short_trait_first_can_be_disabled() {
-    // With the flag off, the two impls tie on every sort key field and
-    // fall through to original_index — i.e. preserve source order.
-    let input = "\
-struct Foo;
-impl std::default::Default for Foo { fn default() -> Self { Foo } }
-impl Default for Foo { fn default() -> Self { Foo } }
-";
-    let cfg = Config {
-        no_short_trait_first: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
-    let p_long = out.find("impl std::default::Default for Foo").unwrap();
-    let p_short = out.find("impl Default for Foo").unwrap();
-    assert!(
-        p_long < p_short,
-        "with flag off, source order should be preserved:\n{out}"
-    );
-}
-#[test]
-fn short_trait_path_sorts_before_long_path() {
-    // `impl Default for Foo` and `impl std::default::Default for Foo`
-    // classify identically (Default is a prelude trait → StdTrait, and
-    // `std::...` also classifies as StdTrait). With the default
-    // `short_trait_first` on, the unqualified form sorts first.
-    let input = "\
-struct Foo;
-impl std::default::Default for Foo { fn default() -> Self { Foo } }
-impl Default for Foo { fn default() -> Self { Foo } }
-";
-    let out = reorder_source(input).unwrap();
-    let p_short = out.find("impl Default for Foo").unwrap();
-    let p_long = out.find("impl std::default::Default for Foo").unwrap();
-    assert!(
-        p_short < p_long,
-        "shorter trait path must precede the qualified form:\n{out}"
-    );
 }
 
 #[test]

@@ -212,29 +212,21 @@ impl fmt::Display for ReorderError {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ImportOrigin {
     Std,
-
     Crate,
-
     Unknown,
 }
 
 pub(crate) struct Block {
     pub(crate) body: String,
-
     pub(crate) leading: String,
-
     pub(crate) category: Category,
-
     pub(crate) trailing: String,
-
     pub(crate) sort_key: SortKey,
-
     /// Visibility for `mod` items, used by the blank-line logic when
     /// `no_preserve_mod_order` is set (pub-mod-first grouping).
     /// `Some(true)` = pub mod, `Some(false)` = private mod,
     /// `None` = not a mod.
     pub(crate) mod_is_pub: Option<bool>,
-
     pub(crate) import_group: Option<ImportGroup>,
 }
 
@@ -347,17 +339,13 @@ pub(crate) struct SortKey {
 /// anchoring, plus the three trait-classification name sets.
 struct ScopeIndex<'a> {
     name_index: &'a HashMap<String, (usize, Category)>,
-
     /// Per-item group key for items in
     /// group-eligible top-level categories
     /// (struct/union/enum/trait/fn/async-fn). Items not in the map
     /// fall back to source order.
     group_keys: &'a HashMap<usize, GroupSortKey>,
-
     std_imports: &'a HashSet<String>,
-
     local_traits: &'a HashSet<String>,
-
     crate_imports: &'a HashSet<String>,
 }
 
@@ -556,10 +544,10 @@ fn reorder_inner(
 
     let scope = ScopeIndex {
         name_index: &name_index,
-        std_imports: &std_imports,
-        crate_imports: &crate_imports,
-        local_traits: &local_traits,
         group_keys: &group_keys,
+        std_imports: &std_imports,
+        local_traits: &local_traits,
+        crate_imports: &crate_imports,
     };
     let mut blocks: Vec<Block> = Vec::with_capacity(parsed.items.len());
     for (idx, (item, &(start, end))) in parsed.items.iter().zip(ranges.iter()).enumerate() {
@@ -620,13 +608,13 @@ fn reorder_inner(
             &scope,
         );
         blocks.push(Block {
-            category,
-            mod_is_pub,
-            import_group,
-            leading,
             body,
+            leading,
+            category,
             trailing: String::new(),
             sort_key,
+            mod_is_pub,
+            import_group,
         });
     }
 
@@ -661,22 +649,22 @@ fn reorder_inner(
         if let Some((comment_text, _)) = fence {
             let fence_segment = segments[i].saturating_add(FENCE_STRIDE / 2);
             blocks.push(Block {
-                category: Category::Fence,
-                mod_is_pub: None,
-                import_group: None,
-                leading: comment_text.clone(),
                 body: String::new(),
+                leading: comment_text.clone(),
+                category: Category::Fence,
                 trailing: String::new(),
                 sort_key: SortKey {
+                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
                     segment: fence_segment,
                     primary: 0,
-                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
                     follower: 0,
                     impl_kind: 0,
-                    trait_path_len: 0,
                     import_group: 0,
+                    trait_path_len: 0,
                     original_index: n_items + fence_idx,
                 },
+                mod_is_pub: None,
+                import_group: None,
             });
             fence_idx += 1;
         }
@@ -920,26 +908,26 @@ fn compute_sort_key(
                     .copied()
                     .unwrap_or_else(|| GroupSortKey::source_order(anchor_idx));
                 return SortKey {
+                    anchor: (group_key, anchor_idx),
                     segment,
                     primary: anchor_cat.weight(cfg),
-                    anchor: (group_key, anchor_idx),
                     follower: 1,
                     impl_kind: kind as u8,
-                    trait_path_len,
                     import_group: 0,
+                    trait_path_len,
                     original_index: idx,
                 };
             }
             // Orphan impl: still classify by trait kind so all-std comes before
             // all-external when several orphan impls share the Impl bucket.
             return SortKey {
+                anchor: (GroupSortKey::source_order(0), 0),
                 segment,
                 primary,
-                anchor: (GroupSortKey::source_order(0), 0),
                 follower: 0,
                 impl_kind: kind as u8,
-                trait_path_len,
                 import_group: 0,
+                trait_path_len,
                 original_index: idx,
             };
         }
@@ -980,13 +968,13 @@ fn compute_sort_key(
     };
 
     SortKey {
+        anchor,
         segment,
         primary,
-        anchor,
         follower: 0,
         impl_kind: 0,
-        trait_path_len: 0,
         import_group: subgroup,
+        trait_path_len: 0,
         original_index: idx,
     }
 }

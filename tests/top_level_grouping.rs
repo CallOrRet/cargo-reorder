@@ -89,6 +89,24 @@ fn process_b() {}
 }
 
 #[test]
+fn same_mean_groups_stay_contiguous() {
+    let input = "\
+fn foo_abcde() {}
+fn bar_xyz() {}
+fn foo_a() {}
+";
+    let out = reorder_source(input).unwrap();
+    // Group `foo`: foo_a (5), foo_abcde (9) -> mean 7
+    // Group `bar`: bar_xyz (7) -> mean 7
+    // Equal group means preserve group source order, so the foo group
+    // remains contiguous instead of letting bar_xyz split it.
+    let p_foo_a = out.find("fn foo_a").unwrap();
+    let p_foo_abcde = out.find("fn foo_abcde").unwrap();
+    let p_bar = out.find("fn bar_xyz").unwrap();
+    assert!(p_foo_a < p_foo_abcde && p_foo_abcde < p_bar, "{out}");
+}
+
+#[test]
 fn fn_and_async_fn_are_separate_buckets() {
     // Fn (90) and AsyncFn (91) are different categories; grouping
     // happens within each independently.
@@ -138,24 +156,6 @@ fn cache_set() {}
         p_cget < p_cset && p_cset < p_ulogin && p_ulogin < p_ulogout,
         "{out}"
     );
-}
-
-#[test]
-fn same_mean_groups_stay_contiguous() {
-    let input = "\
-fn foo_abcde() {}
-fn bar_xyz() {}
-fn foo_a() {}
-";
-    let out = reorder_source(input).unwrap();
-    // Group `foo`: foo_a (5), foo_abcde (9) -> mean 7
-    // Group `bar`: bar_xyz (7) -> mean 7
-    // Equal group means preserve group source order, so the foo group
-    // remains contiguous instead of letting bar_xyz split it.
-    let p_foo_a = out.find("fn foo_a").unwrap();
-    let p_foo_abcde = out.find("fn foo_abcde").unwrap();
-    let p_bar = out.find("fn bar_xyz").unwrap();
-    assert!(p_foo_a < p_foo_abcde && p_foo_abcde < p_bar, "{out}");
 }
 
 #[test]

@@ -22,18 +22,14 @@ use cargo_reorder::{Config, reorder_source_with, reorder_source_with_path};
 
 enum Outcome {
     Changed,
-
     Unchanged,
-
     ParseError,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum ColorChoice {
     Auto,
-
     Never,
-
     Always,
 }
 
@@ -70,22 +66,9 @@ EXAMPLES:
 "
 )]
 struct Cli {
-    /// Process only the named package(s) (matches `cargo fmt -p NAME`).
-    #[arg(short = 'p', long = "package", value_name = "NAME")]
-    package: Vec<String>,
-
     /// Process every workspace member (matches `cargo fmt --all`).
     #[arg(long, conflicts_with = "package")]
     all: bool,
-
-    /// Path to the `Cargo.toml` to use for metadata discovery.
-    #[arg(long, value_name = "PATH")]
-    manifest_path: Option<PathBuf>,
-
-    /// Verbose: log every file rewritten (default mode is silent).
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Run `cargo fmt` (with the same `-p` / `--all` / `--manifest-path`
     /// args you passed here) *before* the reorder pass. Skipped under
     /// `--check` so a CI gate doesn't accidentally write to disk;
@@ -93,23 +76,20 @@ struct Cli {
     /// --check` if you want both to gate independently.
     #[arg(long)]
     fmt: bool,
-
     /// Print a unified diff for every file that would change and exit 1
     /// if any do. Does not modify files.
     #[arg(long)]
     check: bool,
-
     /// Coloured diff and error output: `auto` (default — colour when
     /// stderr is a tty and `NO_COLOR` is unset), `always`, or `never`.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto, value_name = "WHEN")]
     color: ColorChoice,
-
-    /// Extra arguments after `--` are forwarded verbatim to `cargo fmt`
-    /// (which in turn forwards them to `rustfmt`). Only meaningful with
-    /// `--fmt`. Mirrors cargo fmt's own `cargo fmt -- <rustfmt_options>`.
-    #[arg(last = true, value_name = "RUSTFMT_OPTIONS")]
-    rustfmt_options: Vec<String>,
-
+    /// Process only the named package(s) (matches `cargo fmt -p NAME`).
+    #[arg(short = 'p', long = "package", value_name = "NAME")]
+    package: Vec<String>,
+    /// Verbose: log every file rewritten (default mode is silent).
+    #[arg(short, long)]
+    verbose: bool,
     /// Reorder function parameters. Off by default because parameter
     /// order is part of the call contract. When on, the first receiver
     /// (`self`, `mut self`, `&self`, `&mut self`) stays first and the
@@ -117,6 +97,14 @@ struct Cli {
     /// rule.
     #[arg(long)]
     fn_args: bool,
+    /// Path to the `Cargo.toml` to use for metadata discovery.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+    /// Extra arguments after `--` are forwarded verbatim to `cargo fmt`
+    /// (which in turn forwards them to `rustfmt`). Only meaningful with
+    /// `--fmt`. Mirrors cargo fmt's own `cargo fmt -- <rustfmt_options>`.
+    #[arg(last = true, value_name = "RUSTFMT_OPTIONS")]
+    rustfmt_options: Vec<String>,
     /// Disable reordering named fields inside `struct` / `union` /
     /// `enum`. By default, fields are grouped by their first word
     /// (snake_case `_` separator or PascalCase / camelCase boundary);
@@ -269,8 +257,8 @@ fn run(cli: Cli) -> Result<i32> {
     }
 
     let opts = DiscoverOptions {
-        all_packages: cli.all,
         packages: &cli.package,
+        all_packages: cli.all,
         manifest_path: cli.manifest_path.as_deref(),
     };
     let files = discover(opts).context("discovering files via `cargo metadata`")?;

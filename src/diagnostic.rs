@@ -28,10 +28,8 @@ const RESET: &str = "\x1b[0m";
 pub enum Color {
     /// Emit colour only when the sink is a tty and `NO_COLOR` is unset.
     Auto,
-
     /// Never emit colour.
     Never,
-
     /// Always emit colour, regardless of tty / `NO_COLOR`.
     Always,
 }

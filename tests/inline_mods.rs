@@ -224,6 +224,24 @@ mod inner {
 }
 
 #[test]
+fn flag_off_keeps_test_mod_body_verbatim_too() {
+    // Sanity: with flag OFF the cfg(test) skip is moot — we never recurse.
+    let input = "\
+#[cfg(test)]
+mod tests {
+    fn helper_b() {}
+    use super::*;
+}
+";
+    let out = reorder_source(input).unwrap();
+    let body_start = out.find("mod tests {").unwrap();
+    let body = &out[body_start..];
+    let p_b = body.find("fn helper_b").unwrap();
+    let p_use = body.find("use super::*").unwrap();
+    assert!(p_b < p_use, "flag off: body verbatim:\n{out}");
+}
+
+#[test]
 fn mod_with_one_non_use_is_eligible() {
     // The "100% `use`" skip rule kicks in only when EVERY item is `use`.
     // A single non-`use` item makes it eligible.
@@ -242,24 +260,6 @@ pub mod almost_prelude {
         p_use < p_fn,
         "with at least one non-use item, body should reorder normally:\n{out}"
     );
-}
-
-#[test]
-fn flag_off_keeps_test_mod_body_verbatim_too() {
-    // Sanity: with flag OFF the cfg(test) skip is moot — we never recurse.
-    let input = "\
-#[cfg(test)]
-mod tests {
-    fn helper_b() {}
-    use super::*;
-}
-";
-    let out = reorder_source(input).unwrap();
-    let body_start = out.find("mod tests {").unwrap();
-    let body = &out[body_start..];
-    let p_b = body.find("fn helper_b").unwrap();
-    let p_use = body.find("use super::*").unwrap();
-    assert!(p_b < p_use, "flag off: body verbatim:\n{out}");
 }
 
 #[test]

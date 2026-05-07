@@ -39,21 +39,13 @@ use syn::Item;
 #[derive(Debug, Default, Clone, Copy)]
 struct Counts {
     mu_tied: u32,
-
     pp_tied: u32,
-
     ts_tied: u32,
-
     mod_first: u32,
-
     use_first: u32,
-
     pub_first: u32,
-
     priv_first: u32,
-
     trait_first: u32,
-
     struct_first: u32,
 }
 
@@ -77,15 +69,10 @@ impl std::ops::AddAssign for Counts {
 #[derive(Default)]
 struct FileObs {
     mods: Vec<usize>, // private + pub external mods
-
     uses: Vec<usize>,
-
     types: Vec<usize>, // struct / enum / union
-
     traits: Vec<usize>,
-
-    pub_mods: Vec<usize>, // external `pub mod` only
-
+    pub_mods: Vec<usize>,  // external `pub mod` only
     priv_mods: Vec<usize>, // external private `mod` only
 }
 

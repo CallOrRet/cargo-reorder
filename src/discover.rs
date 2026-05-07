@@ -23,12 +23,10 @@ pub struct DiscoverOptions<'a> {
     /// Limit to packages with these names (matches `cargo fmt -p NAME`).
     /// Empty slice means "no filter".
     pub packages: &'a [String],
-
     /// Include every workspace member's targets. Without this, only the
     /// current package (whose Cargo.toml is closest to the cwd) is used.
     /// Mutually exclusive with `packages` — if both are set, `packages` wins.
     pub all_packages: bool,
-
     /// Override the manifest path (forwarded to `cargo metadata`).
     pub manifest_path: Option<&'a Path>,
 }

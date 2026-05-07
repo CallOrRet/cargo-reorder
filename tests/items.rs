@@ -231,6 +231,31 @@ fn cfg_test_mod_forced_to_end() {
 }
 
 #[test]
+fn cfg_test_on_non_mod_does_not_promote_to_test_mod() {
+    // `#[cfg(test)] fn helper()` is just a cfg-gated fn — not a test
+    // mod. It should NOT be forced to file end with weight 999; it
+    // stays in the regular Fn bucket alongside the unattributed fn.
+    // (Within-Fn-bucket order is decided by name-group sorting; what
+    // we want to pin here is bucket membership, not relative order.)
+    let input = "\
+struct Sentinel;
+
+#[cfg(test)]
+fn test_only_helper() {}
+
+fn always() {}
+";
+    let out = reorder_source(input).unwrap();
+    let p_struct = out.find("struct Sentinel").unwrap();
+    let p_helper = out.find("fn test_only_helper").unwrap();
+    let p_always = out.find("fn always").unwrap();
+    // Struct (weight 51) precedes both fns (weight 90).
+    assert!(
+        p_struct < p_helper && p_struct < p_always,
+        "both fns must be in the Fn bucket, not promoted to TestMod (999):\n{out}"
+    );
+}
+#[test]
 fn trait_alias_treated_as_trait() {
     // `trait Foo = Bar + Baz;` is an unstable feature but still parsed by
     // syn as `Item::TraitAlias`. It should classify as Trait.
@@ -255,31 +280,5 @@ fn trait_then_enum_then_struct_with_default_flags() {
         out.find("trait T").unwrap() < out.find("enum E").unwrap()
             && out.find("enum E").unwrap() < out.find("struct S").unwrap(),
         "{out}"
-    );
-}
-
-#[test]
-fn cfg_test_on_non_mod_does_not_promote_to_test_mod() {
-    // `#[cfg(test)] fn helper()` is just a cfg-gated fn — not a test
-    // mod. It should NOT be forced to file end with weight 999; it
-    // stays in the regular Fn bucket alongside the unattributed fn.
-    // (Within-Fn-bucket order is decided by name-group sorting; what
-    // we want to pin here is bucket membership, not relative order.)
-    let input = "\
-struct Sentinel;
-
-#[cfg(test)]
-fn test_only_helper() {}
-
-fn always() {}
-";
-    let out = reorder_source(input).unwrap();
-    let p_struct = out.find("struct Sentinel").unwrap();
-    let p_helper = out.find("fn test_only_helper").unwrap();
-    let p_always = out.find("fn always").unwrap();
-    // Struct (weight 51) precedes both fns (weight 90).
-    assert!(
-        p_struct < p_helper && p_struct < p_always,
-        "both fns must be in the Fn bucket, not promoted to TestMod (999):\n{out}"
     );
 }

@@ -155,23 +155,6 @@ fn macro_heavy(c: &mut Criterion) {
     g.finish();
 }
 
-fn impls_heavy(c: &mut Criterion) {
-    let mut g = c.benchmark_group("impls_heavy");
-    let cases: &[(&str, String)] = &[
-        ("20types_5each", impls_heavy_source(20, 5)),
-        ("50types_5each", impls_heavy_source(50, 5)),
-    ];
-    for (name, src) in cases {
-        g.throughput(Throughput::Bytes(src.len() as u64));
-        g.bench_function(*name, |b| {
-            b.iter(|| {
-                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
-            });
-        });
-    }
-    g.finish();
-}
-
 /// `m` macro definitions, each invoked by `c` non-macro callers.
 /// Stresses the macro-as-barrier segment computation: each macro
 /// punches a private segment that splits its surrounding callers.
@@ -191,6 +174,23 @@ fn macro_heavy_source(macros: usize, callers_per_macro: usize) -> String {
         s.push_str(&format!("macro_rules! m_{mi} {{ () => {{ {mi} }}; }}\n"));
     }
     s
+}
+
+fn impls_heavy(c: &mut Criterion) {
+    let mut g = c.benchmark_group("impls_heavy");
+    let cases: &[(&str, String)] = &[
+        ("20types_5each", impls_heavy_source(20, 5)),
+        ("50types_5each", impls_heavy_source(50, 5)),
+    ];
+    for (name, src) in cases {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
+            });
+        });
+    }
+    g.finish();
 }
 
 /// `n_types` types each with `impls_per_type` impls (mix of inherent /
