@@ -386,13 +386,13 @@ struct Foo {                  struct Foo {
 
 | 模式 | 跳过原因 |
 | --- | --- |
-| `#[cfg(test)] mod ...` / `mod tests { ... }` | 已被 `--tests-last` 拉到文件末尾；测试夹具的顺序往往是叙事性的，重排会掩盖意图 |
+| `#[cfg(test)] mod ...` / `mod tests { ... }` | 默认就被 tests-last 规则拉到文件末尾(用 `--no-tests-last` 可关闭)；测试夹具的顺序往往是叙事性的，重排会掩盖意图 |
 | `#[macro_use] mod ...` | 里面定义的 `macro_rules!` 会泄露到父作用域，body 内重排会改变可见性顺序 |
 | 纯 `use` mod（所有 item 都是 `use ...`） | 覆盖 `prelude`、`__private`、sealed-trait re-export 等场景 —— 这种顺序就是公共 API 的一部分 |
 
 只要 body 里**有一个非-`use` 的 item**,这个 mod 就是合格目标。inline mod body 内的 `macro_rules!` 同样作为 barrier 处理 —— 在 body 内部钉位,body 内任何其他 item 都不能跨过它。
 
-默认关，因为 `prelude` 风格 mod 和 codegen 脚手架在生态里很常见，意外重排它们的代价比"常规 inline mod 重排"的收益大。建议先在代表性文件上看完 diff 再全项目开。
+默认开启 inline mod 递归。`prelude` 风格 mod 和 codegen 脚手架在生态里很常见,这些场景里的 body 顺序往往是 API 契约的一部分 —— 上面表格里的几类(`#[cfg(test)] mod`、`#[macro_use] mod`、纯 `use` mod)会被自动跳过 body 重排,对其他 inline mod 才递归。如果某个项目里还想完全关掉 inline mod 递归,加 `--no-reorder-inline-mods` 即可。
 
 ## 注释和属性
 

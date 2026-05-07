@@ -34,9 +34,10 @@ fn after() {}
 #[test]
 fn nothing_reorders_across_macro_rules() {
     // `const A` and `use std::fmt;` would normally sort before
-    // `struct B` (use(11) < const(40) < struct(51)), but the macro
-    // between use and the others pins everything: items above the
-    // macro can't move below, items below can't move above.
+    // `struct B` (use(31) < const(40) < struct(51) under the default
+    // mod-first weights), but the macro between use and the others
+    // pins everything: items above the macro can't move below, items
+    // below can't move above.
     let input = "\
 struct B;
 
@@ -121,7 +122,7 @@ mod inner;
 ";
     let out = reorder_source(input).unwrap();
     syn::parse_file(&out).unwrap();
-    // Default order: `mod` (weight 30) before `fn` (weight 90).
+    // Default order: `mod` (weight 10) before `fn` (weight 90).
     let p_mod = out.find("mod inner").unwrap();
     let p_fn = out.find("fn z").unwrap();
     assert!(p_mod < p_fn, "plain mod must sort by category:\n{out}");

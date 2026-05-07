@@ -47,10 +47,11 @@ impl Drop for TempDir {
 
 /// Real-world shape: original parent file has the macro declared *before*
 /// the `mod foo;` (so it compiles via Rust's textual-scope inheritance).
-/// Default category sort would push the macro to the end (Category::Macro
-/// weight 92) and the mod near the top (weight 30), breaking the file.
-/// The cross-file scan must detect that paths.rs invokes `t!()` bare and
-/// keep the macro above the mod in the output.
+/// Naive category sort would push the macro to the end
+/// (Category::Macro weight 92) and the mod near the top (default
+/// weight 10), breaking the file. The macro-as-barrier rule pins the
+/// `macro_rules!` in its source position, which keeps the mod above
+/// it from sorting down past it — no child-file scan is needed.
 #[test]
 fn child_with_bare_macro_call_keeps_macro_above_mod() {
     let td = TempDir::new("constrains");
@@ -75,11 +76,10 @@ pub mod paths;
     );
 }
 
-/// Same shape but the child file does `use crate::t;`. Now the macro
-/// is reachable through name resolution, no textual scope needed, and
-/// the cross-file scan should drop the position constraint — the
-/// macro is free to sort to its default end-of-file slot.
-/// `#[path = "..."]` overrides the conventional file lookup.
+/// `#[path = "..."]` overrides the conventional child-file lookup.
+/// Reorder still pins the `macro_rules!` at its source position via
+/// the barrier rule and `pub mod helper` declared underneath stays
+/// below it, regardless of where the child file actually lives.
 #[test]
 fn path_attribute_on_mod_locates_child_file() {
     let td = TempDir::new("path_attr");
@@ -108,9 +108,10 @@ pub mod helper;
     );
 }
 
-/// `mod absent;` declared but `absent.rs` doesn't exist on disk →
-/// cross-file scan can't read it → fall back to the conservative rule
-/// (mod was originally after the macro in source, so we preserve that).
+/// `mod absent;` declared but `absent.rs` doesn't exist on disk —
+/// missing child files are not consulted; the macro-as-barrier rule
+/// alone keeps `mod absent;` below the `macro_rules!` declared above
+/// it in source.
 #[test]
 fn missing_child_file_falls_back_to_conservative() {
     let td = TempDir::new("missing");

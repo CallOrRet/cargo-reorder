@@ -1,6 +1,7 @@
 //! Reordering pipeline: parse with `syn`, slice the source into per-item
-//! `Block`s (leading comments + body + trailing gap), assign sort keys,
-//! sort, post-process macro placement, reassemble.
+//! `Block`s (leading comments + body + trailing gap), assign sort keys
+//! (with bare top-level macro invocations sitting on private "barrier"
+//! segments so siblings can't reorder past them), sort, reassemble.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -269,8 +270,9 @@ pub(crate) struct Block {
     pub(crate) category: Category,
     pub(crate) import_group: Option<ImportGroup>,
     /// Visibility for `mod` items, used by the blank-line logic when
-    /// `pub_mod_first` is enabled. `Some(true)` = pub mod, `Some(false)` =
-    /// private mod, `None` = not a mod.
+    /// `no_preserve_mod_order` is set (pub-mod-first grouping).
+    /// `Some(true)` = pub mod, `Some(false)` = private mod,
+    /// `None` = not a mod.
     pub(crate) mod_is_pub: Option<bool>,
     pub(crate) leading: String,
     pub(crate) body: String,
@@ -296,14 +298,19 @@ pub(crate) struct SortKey {
     anchor: (u32, u32, usize),
     /// 0 = the type definition itself, 1 = a follower impl.
     follower: u8,
-    /// Within a type's followers: inherent (0) → std trait (1) → external (2).
+    /// Within a type's followers: inherent (0) → std trait (1) →
+    /// crate trait (2) → external trait (3).
     impl_kind: u8,
     /// Trait-path segment count for trait `impl` blocks (0 for non-impls
     /// and inherent impls). Shorter paths sort first when
     /// `short_trait_path_first` is on; otherwise this is always 0 and
     /// the field is inert.
     trait_path_len: u8,
-    /// Import group (only meaningful for `use` items).
+    /// Sub-bucket inside a category. For `use` items it encodes the
+    /// std → external → crate/super/self/local-mod visual group.
+    /// For `mod` items under `--no-preserve-mod-order` it's reused
+    /// as the pub-vs-private subgroup (0 = pub mod, 1 = private mod).
+    /// Otherwise 0.
     import_group: u8,
     /// Tie-breaker: original source index (preserves stable order).
     pub(crate) original_index: usize,
@@ -694,9 +701,10 @@ fn reorder_inner(source: &str, cfg: &Config) -> Result<String, ReorderError> {
     // (post-bump) segment and the next item's (already further bumped)
     // segment — so sort_by_key keeps the fence wedged between them
     // regardless of how items shuffle within their own segments.
-    // `original_index = n_items + fence_idx` keeps fences out of the
-    // macro pipeline's `[0, n_items)` reverse-index but stays close to
-    // n_items so `yank_macro_defs`'s `pos` Vec doesn't balloon.
+    // `original_index = n_items + fence_idx` parks fences just past
+    // the real items so the stable-sort tiebreaker keeps them next to
+    // their original neighbours, without colliding with any real
+    // item's [0, n_items) index range.
     let n_items = parsed.items.len();
     let mut fence_idx = 0usize;
     for (i, fence) in fence_after.iter().enumerate() {
@@ -838,7 +846,8 @@ fn compute_sort_key(
     // siblings sort by prefix-group + length + source order. Other
     // items get `(0, 0, 0)` so they all tie on anchor and fall
     // through to `subgroup` / `original_index` — preserving e.g. the
-    // `pub_mod_first` secondary-sort path for `mod` items.
+    // pub-mod-first secondary-sort path for `mod` items under
+    // `--no-preserve-mod-order`.
     let anchor = if is_top_level_groupable(category) {
         let (mean, len) = scope.group_keys.get(&idx).copied().unwrap_or((0, 0));
         (mean, len, idx)
@@ -848,7 +857,8 @@ fn compute_sort_key(
 
     // `import_group` field on SortKey is reused as a generic "secondary sort
     // bucket within a category". For Use it is the std/ext/crate-local index;
-    // for Mod with `pub_mod_first` it is 0=pub, 1=private; otherwise 0.
+    // for Mod under `--no-preserve-mod-order` it is 0=pub, 1=private;
+    // otherwise 0.
     let subgroup = if !cfg.no_import_groups && import_group.is_some() {
         import_group_byte
     } else if cfg.no_preserve_mod_order && category == Category::Mod {

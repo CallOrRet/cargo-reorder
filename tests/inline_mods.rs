@@ -331,9 +331,10 @@ mod b {
 }
 
 /// Inside an inline mod body, a `macro_rules!` definition must
-/// precede a `mod bar;` declaration whose child file (resolved at
-/// `<lib_dir>/<inline_mod>/bar.rs`) bare-calls the macro. With the
-/// precise resolver, we open the right child and add the constraint.
+/// precede the next `mod bar;` declaration: macro items act as hard
+/// barriers in their containing scope, so anything below the macro
+/// in source can't sort up across it (and vice versa). No child
+/// file is opened — the barrier alone enforces the constraint.
 #[test]
 fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
     let td = TempDir::new("inline-precise-bare");
@@ -358,12 +359,13 @@ fn precise_macro_constraint_inside_inline_mod_with_bare_caller() {
     // src/foo/bar.rs and yanks the macro back above the mod.
     assert!(
         p_macro < p_mod,
-        "precise scan must keep macro_rules! before `mod bar;` because src/foo/bar.rs invokes it bare:\n{out}"
+        "macro barrier must keep macro_rules! before `mod bar;` in source order:\n{out}"
     );
 }
 
-/// `#[path = "..."]` on the inline mod redirects the entire body's
-/// child-file lookup base. Precise scan must follow it.
+/// `#[path = "..."]` on the inline mod doesn't change body-internal
+/// reordering — the macro-as-barrier rule applies inside the body
+/// regardless of where the (notional) child file would live.
 #[test]
 fn precise_macro_constraint_follows_inline_mod_path_attribute() {
     let td = TempDir::new("inline-precise-path");

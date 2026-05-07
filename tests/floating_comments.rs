@@ -22,10 +22,13 @@ fn assert_idempotent(out: &str) {
 
 #[test]
 fn fence_keeps_items_above_above() {
-    // Without a fence, `mod support;` would move below `use std::fmt;`
-    // (default ordering: extern crate -> use -> mod). The TODO comment
-    // sandwiched by blank lines acts as a fence, pinning `mod support;`
-    // to the segment above.
+    // The default ordering is extern crate -> mod -> use, so even
+    // without a fence `mod support;` already sits above `use std::fmt;`.
+    // The point of this test is the fence: a `// TODO ...` comment
+    // sandwiched by blank lines acts as a section divider — the
+    // assertion checks that the comment ends up *between* the two
+    // groups (mod above the fence, use below it) instead of being
+    // pulled along with one of the items.
     let input = "\
 extern crate test;
 mod support;

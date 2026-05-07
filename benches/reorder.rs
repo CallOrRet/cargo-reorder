@@ -8,10 +8,10 @@
 //! paths so future regressions show up against named baselines:
 //!
 //! * `end_to_end/*` — overall pipeline at small/medium/large sizes.
-//! * `macro_heavy`  — `macros::yank_macro_defs` fixpoint loop.
+//! * `macro_heavy`  — many `macro_rules!` items as barrier segments.
 //! * `imports_heavy`— import classification + std/crate origin tracking.
 //! * `impls_heavy`  — `impl` anchor resolution in compute_sort_key.
-//! * `idempotent`   — second pass over already-sorted output (yank does no work).
+//! * `idempotent`   — second pass over already-sorted output.
 //! * `self_file`    — this project's own `src/reorder.rs` (~840 lines).
 
 use std::fs;
@@ -68,11 +68,12 @@ fn mixed_source(n: usize) -> String {
 }
 
 /// `m` macro definitions, each invoked by `c` non-macro callers.
-/// Forces yank_macro_defs to walk many call sites for many defs.
+/// Stresses the macro-as-barrier segment computation: each macro
+/// punches a private segment that splits its surrounding callers.
 fn macro_heavy_source(macros: usize, callers_per_macro: usize) -> String {
     let mut s = String::new();
-    // Definitions placed at the END of the file so each one needs to be
-    // yanked back over every caller — worst case for the fixpoint loop.
+    // Definitions placed at the END of the file so the segment
+    // computation has many caller items to walk before each barrier.
     let mut callers = String::new();
     for mi in 0..macros {
         for ci in 0..callers_per_macro {
@@ -201,8 +202,8 @@ fn impls_heavy(c: &mut Criterion) {
     g.finish();
 }
 
-/// Second pass over already-reordered source. Sort and yank should both
-/// be no-ops, so this isolates the parse + walk + emit cost.
+/// Second pass over already-reordered source. The sort is a no-op,
+/// so this isolates the parse + walk + emit cost.
 fn idempotent(c: &mut Criterion) {
     let mut g = c.benchmark_group("idempotent");
     let src = mixed_source(200);

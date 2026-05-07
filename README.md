@@ -524,7 +524,7 @@ listing order is part of the contract or affects compilation:
 
 | Pattern | Why we skip |
 | --- | --- |
-| `#[cfg(test)] mod ...` / `mod tests { ... }` | already pulled to file end by `--tests-last`; reordering test fixtures hides intent |
+| `#[cfg(test)] mod ...` / `mod tests { ... }` | already pulled to file end by the default tests-last rule (off via `--no-tests-last`); reordering test fixtures hides intent |
 | `#[macro_use] mod ...` | `macro_rules!` defined inside leak to the parent scope; reordering inside changes visibility order |
 | Pure-`use` mods (every item is `use ...`) | covers `prelude`, `__private`, sealed-trait re-export shims — listing order is the public contract |
 
