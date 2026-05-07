@@ -904,7 +904,6 @@ impl T for S {
     fn make(foo_long: u8, bar: u32, foo: bool) {}
 }
 fn make(foo_long: u8, bar: u32, foo: bool) {}
-
 ";
     let out = reorder_source(input).unwrap();
     assert_eq!(out, want);
@@ -932,7 +931,6 @@ impl T for S {
     fn make(bar: u32, foo: bool, foo_long: u8) {}
 }
 fn make(bar: u32, foo: bool, foo_long: u8) {}
-
 ";
     let out = reorder_source_with(input, &fn_args_on()).unwrap();
     assert_eq!(out, want);

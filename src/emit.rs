@@ -48,6 +48,11 @@ pub(crate) fn assemble(
         prev = Some(blk);
     }
 
+    if footer.is_empty() {
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+    }
     out.push_str(footer);
     if !out.ends_with('\n') {
         out.push('\n');

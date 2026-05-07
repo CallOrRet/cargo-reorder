@@ -224,6 +224,10 @@ fn cfg_test_mod_forced_to_end() {
         out.find("struct S").unwrap() < out.find("fn other").unwrap(),
         "{out}"
     );
+    assert!(
+        !out.ends_with("\n\n"),
+        "tests-last should not carry its original trailing gap to EOF:\n{out:?}"
+    );
 }
 
 #[test]
