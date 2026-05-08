@@ -13,8 +13,13 @@
 //! * `impls_heavy`  — `impl` anchor resolution in compute_sort_key.
 //! * `idempotent`   — second pass over already-sorted output.
 //! * `self_file`    — this project's own `src/reorder.rs` (~840 lines).
+//! * `field_sorting/*` — struct/enum field reordering at various sizes.
+//! * `single_line_fields/*` — single-line struct literal reordering.
+//! * `impl_body/*` — impl/trait body method reordering.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::hint::black_box;
 use std::path::PathBuf;
 
@@ -254,9 +259,213 @@ fn imports_heavy_source(n: usize) -> String {
     s
 }
 
+// ── field_sorting: multi-line named-field reordering ──────────────
+// Stresses `split_lines` allocations in `sort_top_level_with_options`
+// and `byte_offset_for_line_col` for field span → byte-range conversion.
+fn field_sorting(c: &mut Criterion) {
+    let mut g = c.benchmark_group("field_sorting");
+    let cases: &[(&str, String)] = &[
+        ("10structs_10fields", field_sorting_source(10, 10)),
+        ("10structs_50fields", field_sorting_source(10, 50)),
+        ("50structs_10fields", field_sorting_source(50, 10)),
+        ("1struct_200fields", field_sorting_source(1, 200)),
+    ];
+    for (name, src) in cases {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
+            });
+        });
+    }
+    g.finish();
+}
+
+/// `n_structs` each with `n_fields` named fields (randomised order so
+/// sorting actually permutes them). Each field gets a doc-comment line so
+/// the field block is multi-line — this forces the line-based sort path.
+fn field_sorting_source(n_structs: usize, n_fields: usize) -> String {
+    let mut s = String::with_capacity(n_structs * n_fields * 64);
+    for si in 0..n_structs {
+        let mut fields: Vec<String> = (0..n_fields).map(|fi| format!("field_{fi}")).collect();
+        // Deterministic shuffle so sorting has work to do.
+        let mut state = DefaultHasher::new();
+        (si, n_fields).hash(&mut state);
+        let seed = state.finish();
+        for i in 0..fields.len() {
+            let j = (seed as usize + i * 7 + 13) % fields.len();
+            fields.swap(i, j);
+        }
+        s.push_str(&format!("pub struct S{si} {{\n"));
+        for name in &fields {
+            let ty = format!("Type{}_{}", si, name);
+            s.push_str(&format!("    /// Doc for {name}\n"));
+            s.push_str(&format!("    pub {name}: {ty},\n"));
+        }
+        s.push_str("}\n\n");
+    }
+    s
+}
+
+// ── single_line_fields: single-line struct-literal reordering ──────
+// Stresses `byte_range_for_span` → `byte_offset_for_line_col` →
+// `split_lines` — called once per field in every single-line list.
+fn single_line_fields(c: &mut Criterion) {
+    let mut g = c.benchmark_group("single_line_fields");
+    let cases: &[(&str, String)] = &[
+        ("50funcs_20fields", single_line_source(50, 20)),
+        ("200funcs_10fields", single_line_source(200, 10)),
+    ];
+    for (name, src) in cases {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
+            });
+        });
+    }
+    g.finish();
+}
+
+/// `n_funcs` functions, each constructing a single-line struct literal
+/// with `n_fields` named fields in reversed order (so sorting always
+/// permutes). Stresses the single-line reelist byte-range path.
+fn single_line_source(n_funcs: usize, n_fields: usize) -> String {
+    let mut s = String::with_capacity(n_funcs * n_fields * 48);
+    s.push_str("pub struct Data {\n");
+    for fi in 0..n_fields {
+        s.push_str(&format!("    pub field_{fi}: u32,\n"));
+    }
+    s.push_str("}\n\n");
+    for fi in 0..n_funcs {
+        // Write fields from high to low so sorting actually reorders.
+        let mut parts: Vec<String> = (0..n_fields)
+            .rev()
+            .map(|i| format!("field_{i}: {}", i + fi))
+            .collect();
+        // Deterministic shuffle.
+        let mut state = DefaultHasher::new();
+        (fi, n_fields).hash(&mut state);
+        let seed = state.finish();
+        for i in 0..parts.len() {
+            let j = (seed as usize + i * 7 + 13) % parts.len();
+            parts.swap(i, j);
+        }
+        let fields_str = parts.join(", ");
+        s.push_str(&format!(
+            "fn make_{fi}() -> Data {{ Data {{ {fields_str} }} }}\n"
+        ));
+    }
+    s
+}
+
+// ── impl_body: impl/trait body method reordering ───────────────────
+// Stresses `sort_top_level_with_options` prefix-group hashing and
+// the `prefix_of().to_string()` allocation in the inner grouping loop.
+fn impl_body(c: &mut Criterion) {
+    let mut g = c.benchmark_group("impl_body");
+    let cases: &[(&str, String)] = &[
+        ("50methods", impl_body_source(50)),
+        ("200methods", impl_body_source(200)),
+    ];
+    for (name, src) in cases {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
+            });
+        });
+    }
+    g.finish();
+}
+
+/// A struct with an impl block containing `n_methods` methods whose
+/// names are deterministically shuffled so the prefix-group sort has
+/// real work to do. Mixes sync fn and async fn to hit both buckets.
+fn impl_body_source(n_methods: usize) -> String {
+    let mut s = String::with_capacity(n_methods * 64);
+    s.push_str("pub struct Service;\n\nimpl Service {\n");
+    let mut names: Vec<String> = (0..n_methods)
+        .map(|i| {
+            let prefix = match i % 5 {
+                0 => "get",
+                1 => "set",
+                2 => "build",
+                3 => "handle",
+                _ => "validate",
+            };
+            format!("{prefix}_{i}")
+        })
+        .collect();
+    // Deterministic shuffle.
+    let mut state = DefaultHasher::new();
+    n_methods.hash(&mut state);
+    let seed = state.finish();
+    for i in 0..names.len() {
+        let j = (seed as usize + i * 11 + 7) % names.len();
+        names.swap(i, j);
+    }
+    for (i, name) in names.iter().enumerate() {
+        if i % 7 == 0 {
+            s.push_str(&format!("    async fn {name}(&self) {{}}\n"));
+        } else {
+            s.push_str(&format!("    fn {name}(&self) {{}}\n"));
+        }
+    }
+    s.push_str("}\n");
+    s
+}
+
+// ── enum_sorting: enum with many struct-like variants ─────────────
+// Stresses `rewrite_enum`'s repeated `split_lines` calls per variant
+// (`field_block_line_range`, `lines_slice`, `byte_range_for_line_range`).
+fn enum_sorting(c: &mut Criterion) {
+    let mut g = c.benchmark_group("enum_sorting");
+    let cases: &[(&str, String)] = &[
+        ("20variants_10fields", enum_sorting_source(20, 10)),
+        ("50variants_10fields", enum_sorting_source(50, 10)),
+    ];
+    for (name, src) in cases {
+        g.throughput(Throughput::Bytes(src.len() as u64));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let _ = reorder_source_with(black_box(src), black_box(&cfg())).unwrap();
+            });
+        });
+    }
+    g.finish();
+}
+
+/// An enum with `n_variants` struct-like variants, each having
+/// `n_fields` named fields in deterministically shuffled order.
+fn enum_sorting_source(n_variants: usize, n_fields: usize) -> String {
+    let mut s = String::with_capacity(n_variants * n_fields * 64);
+    s.push_str("#[derive(Debug)]\npub enum LargeEnum {\n");
+    for vi in 0..n_variants {
+        let mut fields: Vec<String> = (0..n_fields).map(|fi| format!("field_{fi}")).collect();
+        let mut state = DefaultHasher::new();
+        (vi, n_fields).hash(&mut state);
+        let seed = state.finish();
+        for i in 0..fields.len() {
+            let j = (seed as usize + i * 7 + 13) % fields.len();
+            fields.swap(i, j);
+        }
+        s.push_str(&format!("    Variant{vi} {{\n"));
+        for name in &fields {
+            let ty = format!("T{vi}_{name}");
+            s.push_str(&format!("        /// Doc for {name}\n"));
+            s.push_str(&format!("        pub {name}: {ty},\n"));
+        }
+        s.push_str("    },\n");
+    }
+    s.push_str("}\n");
+    s
+}
+
 criterion_group!(
     name = benches;
     config = profiled();
-    targets = end_to_end, macro_heavy, imports_heavy, impls_heavy, idempotent, self_file
+    targets = end_to_end, macro_heavy, imports_heavy, impls_heavy, idempotent, self_file,
+             field_sorting, single_line_fields, impl_body, enum_sorting
 );
 criterion_main!(benches);

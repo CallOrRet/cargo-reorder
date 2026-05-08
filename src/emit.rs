@@ -26,7 +26,16 @@ pub(crate) fn assemble(
     footer: &str,
     cfg: &Config,
 ) -> String {
-    let mut out = String::new();
+    // Pre-compute capacity to avoid reallocations during push.
+    let cap = header.len()
+        + header_extra.len()
+        + footer.len()
+        + blocks
+            .iter()
+            .map(|b| b.leading.len() + b.body.len() + b.trailing.len())
+            .sum::<usize>()
+        + blocks.len(); // conservative: at most one extra '\n' per block boundary
+    let mut out = String::with_capacity(cap);
     out.push_str(header);
     out.push_str(header_extra);
 

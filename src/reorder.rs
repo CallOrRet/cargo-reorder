@@ -519,14 +519,23 @@ fn reorder_inner(
         .map(|s| s.saturating_mul(FENCE_STRIDE))
         .collect();
     let mut fence_after: Vec<Option<(String, String)>> = vec![None; parsed.items.len()];
+
+    // Pre-compute all inter-item gaps once — avoids calling take_lines
+    // twice per gap (once here, once in the trailing/leading split).
+    let num_gaps = parsed.items.len().saturating_sub(1);
+    let gaps: Vec<String> = (0..num_gaps)
+        .map(|i| {
+            let (_, end_i) = ranges[i];
+            let (start_next, _) = ranges[i + 1];
+            take_lines(&lines, end_i + 1, start_next.saturating_sub(1))
+        })
+        .collect();
+
     let mut fence_bump: u32 = 0;
     for i in 0..parsed.items.len() {
         bumped_segments[i] = bumped_segments[i].saturating_add(fence_bump);
-        if i + 1 < parsed.items.len() {
-            let (_, end_i) = ranges[i];
-            let (start_next, _) = ranges[i + 1];
-            let gap = take_lines(&lines, end_i + 1, start_next.saturating_sub(1));
-            if let Some((comment, residual)) = extract_floating_comment(&gap) {
+        if i < num_gaps {
+            if let Some((comment, residual)) = extract_floating_comment(&gaps[i]) {
                 fence_after[i] = Some((comment, residual));
                 fence_bump = fence_bump.saturating_add(FENCE_STRIDE);
             }
@@ -617,16 +626,10 @@ fn reorder_inner(
         });
     }
 
-    for i in 0..parsed.items.len().saturating_sub(1) {
-        let (_, end_i) = ranges[i];
-        let (start_next, _) = ranges[i + 1];
-        let gap = take_lines(&lines, end_i + 1, start_next.saturating_sub(1));
-        // If a floating-comment fence lives in this gap, split on what
-        // remains *after* extracting the comment text — the comment
-        // itself is owned by the fence block we append below.
+    for i in 0..num_gaps {
         let effective_gap = match &fence_after[i] {
             Some((_, residual)) => residual.clone(),
-            None => gap,
+            None => gaps[i].clone(),
         };
         let (trailing, next_leading) = split_at_last_blank(&effective_gap);
         blocks[i].trailing = trailing;
@@ -721,10 +724,11 @@ fn classify_trait_path(
     local_traits: &HashSet<String>,
 ) -> ImplKind {
     if let Some(first) = path.segments.first() {
-        match first.ident.to_string().as_str() {
-            "std" | "core" | "alloc" => return ImplKind::StdTrait,
-            "crate" | "self" | "super" => return ImplKind::CrateTrait,
-            _ => {}
+        if first.ident == "std" || first.ident == "core" || first.ident == "alloc" {
+            return ImplKind::StdTrait;
+        }
+        if first.ident == "crate" || first.ident == "self" || first.ident == "super" {
+            return ImplKind::CrateTrait;
         }
     }
     if path.segments.len() == 1 {
@@ -765,11 +769,15 @@ fn collect_use_imports(
     match tree {
         Path(p) => {
             let next = match origin {
-                ImportOrigin::Unknown => match p.ident.to_string().as_str() {
-                    "std" | "core" | "alloc" => ImportOrigin::Std,
-                    "crate" | "self" | "super" => ImportOrigin::Crate,
-                    _ => ImportOrigin::Unknown,
-                },
+                ImportOrigin::Unknown => {
+                    if p.ident == "std" || p.ident == "core" || p.ident == "alloc" {
+                        ImportOrigin::Std
+                    } else if p.ident == "crate" || p.ident == "self" || p.ident == "super" {
+                        ImportOrigin::Crate
+                    } else {
+                        ImportOrigin::Unknown
+                    }
+                }
                 _ => origin,
             };
             collect_use_imports(&p.tree, next, std_out, crate_out);
@@ -1009,8 +1017,7 @@ fn is_top_level_groupable(cat: Category) -> bool {
 ///     `__private`, sealed-trait re-export shims, etc., where the
 ///     listing order is part of the module's public contract.
 fn should_skip_inline_recursion(m: &syn::ItemMod, items: &[Item]) -> bool {
-    let name = m.ident.to_string();
-    if name == "tests" || name == "test" || has_cfg_test(&m.attrs) {
+    if m.ident == "tests" || m.ident == "test" || has_cfg_test(&m.attrs) {
         return true;
     }
     if m.attrs.iter().any(|a| a.path().is_ident("macro_use")) {

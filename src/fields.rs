@@ -195,27 +195,67 @@ pub(crate) fn prefix_of(name: &str) -> &str {
 }
 
 /// Split `text` into lines, each retaining its trailing `\n` if any.
-fn split_lines(text: &str) -> Vec<String> {
+/// Returns slices into `text` — zero-copy (unlike the previous
+/// `Vec<String>` version).
+fn split_lines(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let bytes = text.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'\n' {
-            out.push(text[start..=i].to_string());
+            out.push(&text[start..=i]);
             start = i + 1;
         }
     }
     if start < text.len() {
-        out.push(text[start..].to_string());
+        out.push(&text[start..]);
     }
     out
 }
 
-fn lines_slice(text: &str, text_start_line: usize, line_lo: usize, line_hi: usize) -> String {
-    let lines = split_lines(text);
-    let lo = line_lo.saturating_sub(text_start_line);
-    let hi = line_hi.saturating_sub(text_start_line).min(lines.len() - 1);
-    lines[lo..=hi].concat()
+/// Convert a 1-based line range to a byte range within `text`.
+/// Single-pass byte scan — no Vec allocations.  Returns `None` when
+/// the line range is out of bounds.
+fn byte_range_of_lines(text: &str, line_lo: usize, line_hi: usize) -> Option<(usize, usize)> {
+    if line_lo == 0 || line_hi == 0 || line_lo > line_hi {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut current = 1usize;
+    let mut lo_byte = 0usize;
+    // Find start of line_lo.
+    for (i, &b) in bytes.iter().enumerate() {
+        if current == line_lo {
+            lo_byte = i;
+            break;
+        }
+        if b == b'\n' {
+            current += 1;
+        }
+    }
+    if current < line_lo {
+        return None; // line_lo is past EOF
+    }
+    // Find end of line_hi.
+    current = line_lo;
+    for (i, &b) in bytes[lo_byte..].iter().enumerate() {
+        let abs = lo_byte + i;
+        if current == line_hi {
+            let hi_byte = match text[abs..].find('\n') {
+                Some(rel) => abs + rel,
+                None => text.len(),
+            };
+            return (lo_byte <= hi_byte).then_some((lo_byte, hi_byte));
+        }
+        if b == b'\n' {
+            current += 1;
+        }
+    }
+    // line_hi is the last line.
+    if current == line_hi {
+        return (lo_byte <= text.len()).then_some((lo_byte, text.len()));
+    }
+    None
 }
 
 fn member_entry(
@@ -308,20 +348,25 @@ fn rewrite_enum(
     let mut variant_rewrites: Vec<(usize, usize, String)> = Vec::new();
     for v in &e.variants {
         if let Fields::Named(named) = &v.fields {
-            // Compute the line range of this named-fields block in
-            // body_text. We need to slice it out, rewrite, splice back.
-            let line_range = field_block_line_range(&out, start_line, named);
-            if let Some((line_lo, line_hi)) = line_range {
-                let block_text = lines_slice(&out, start_line, line_lo, line_hi);
+            let span = named.span();
+            let line_lo = span.start().line;
+            let line_hi = span.end().line;
+            // Single byte-range scan replaces the old three-call
+            // sequence: field_block_line_range + lines_slice +
+            // byte_range_for_line_range.
+            if let Some((lo_byte, hi_byte)) = byte_range_of_lines(
+                &out,
+                line_lo.saturating_sub(start_line).saturating_add(1),
+                line_hi.saturating_sub(start_line).saturating_add(1),
+            ) {
+                let block_text = &out[lo_byte..hi_byte];
                 if let Some(rewritten) = rewrite_named_fields_inplace(
-                    &block_text,
+                    block_text,
                     line_lo,
                     named,
                     false,
                     preserve_field_blank_lines,
                 ) {
-                    let (lo_byte, hi_byte) =
-                        byte_range_for_line_range(&out, start_line, line_lo, line_hi);
                     variant_rewrites.push((lo_byte, hi_byte, rewritten));
                 }
             }
@@ -774,7 +819,7 @@ where
 
     // Convert text into a Vec of full-line strings (each ending with \n
     // except possibly the last). This makes range-based splicing trivial.
-    let lines: Vec<String> = split_lines(text);
+    let lines: Vec<&str> = split_lines(text);
     let total_lines = lines.len();
 
     // Translate each entry's source line numbers to indices into
@@ -840,10 +885,10 @@ where
     // doesn't need to rescan members.
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut group_totals: Vec<(u8, usize, usize)> = Vec::new();
-    let mut by_key: std::collections::HashMap<(u8, String), usize> =
+    let mut by_key: std::collections::HashMap<(u8, &str), usize> =
         std::collections::HashMap::with_capacity(ranges.len());
     for (idx, (_, _, name, bucket)) in ranges.iter().enumerate() {
-        let key = (*bucket, prefix_of(name).to_string());
+        let key = (*bucket, prefix_of(name));
         let name_len = name.len();
         if let Some(&gi) = by_key.get(&key) {
             groups[gi].push(idx);
@@ -915,26 +960,6 @@ where
         header.push('\n');
     }
     Some(format!("{header}{body}{footer}"))
-}
-
-/// Find the line range (inclusive, 1-based source lines) that an
-/// inline named-fields block occupies in `text`, given the parsed
-/// `FieldsNamed` whose span coordinates refer to the original source.
-fn field_block_line_range(
-    text: &str,
-    text_start_line: usize,
-    named: &FieldsNamed,
-) -> Option<(usize, usize)> {
-    let span = named.span();
-    let lo = span.start().line;
-    let hi = span.end().line;
-    let total = split_lines(text).len();
-    let _lo_idx = lo.checked_sub(text_start_line)?;
-    let hi_idx = hi.checked_sub(text_start_line)?;
-    if hi_idx >= total {
-        return None;
-    }
-    Some((lo, hi))
 }
 
 fn derive_list_pins_order(attr: &Attribute) -> bool {
@@ -1016,39 +1041,35 @@ fn byte_range_for_span(text: &str, span: proc_macro2::Span) -> Option<(usize, us
     (lo < hi).then_some((lo, hi))
 }
 
+/// Convert a 1-based line + 0-based byte-column to an absolute byte
+/// offset within `text`. Single-pass byte scan — no line-splitting
+/// vector allocation.
 fn byte_offset_for_line_col(text: &str, line: usize, col: usize) -> Option<usize> {
-    let mut byte = 0usize;
-    for (idx, l) in split_lines(text).iter().enumerate() {
-        if idx + 1 == line {
-            let line_text = l.strip_suffix('\n').unwrap_or(l);
-            return (col <= line_text.len()).then_some(byte + col);
+    if line == 0 {
+        return None;
+    }
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    for (i, &b) in text.as_bytes().iter().enumerate() {
+        if current_line == line {
+            let line_len = text[line_start..]
+                .find('\n')
+                .unwrap_or(text.len() - line_start);
+            return (col <= line_len).then_some(line_start + col);
         }
-        byte += l.len();
+        if b == b'\n' {
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+    // The target line is the last line (no trailing \n on it).
+    if current_line == line {
+        let line_len = text.len() - line_start;
+        return (col <= line_len).then_some(line_start + col);
     }
     None
 }
 
-fn byte_range_for_line_range(
-    text: &str,
-    text_start_line: usize,
-    line_lo: usize,
-    line_hi: usize,
-) -> (usize, usize) {
-    let lines = split_lines(text);
-    let lo_idx = line_lo.saturating_sub(text_start_line).min(lines.len());
-    let hi_idx = line_hi
-        .saturating_sub(text_start_line)
-        .min(lines.len().saturating_sub(1));
-    let mut byte = 0usize;
-    for l in &lines[..lo_idx] {
-        byte += l.len();
-    }
-    let mut end_byte = byte;
-    for l in &lines[lo_idx..=hi_idx] {
-        end_byte += l.len();
-    }
-    (byte, end_byte)
-}
 /// Top-level entry point: given a parsed item and its raw source text,
 /// return a rewritten version with fields/variants reordered, or
 /// `None` if no rewrite was performed.

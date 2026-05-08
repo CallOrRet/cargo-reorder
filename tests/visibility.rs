@@ -90,6 +90,9 @@ pub(crate) mod restricted;
     let p_restricted = out.find("pub(crate) mod restricted").unwrap();
     let p_fn = out.find("fn z").unwrap();
     // pub mod (public_api, restricted) before private mod (internal)
-    assert!(p_public < p_restricted && p_restricted < p_internal, "{out}");
+    assert!(
+        p_public < p_restricted && p_restricted < p_internal,
+        "{out}"
+    );
     assert!(p_internal < p_fn, "{out}");
 }
