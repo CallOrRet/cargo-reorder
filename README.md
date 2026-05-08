@@ -257,7 +257,7 @@ either): work at the package level instead.
 | `--no-mod-before-use` | put `use` before `mod` (default is mod-first; see "On `--no-mod-before-use`" below) |
 | `--no-short-trait-first` | preserve source order between trait impls with different path lengths (default is shortest-first) |
 | `--no-trim-field-blanks` | preserve existing blank lines between reordered multi-line fields (default trims them; first-field leading blanks are always dropped) |
-| `--no-preserve-mod-order` | sort `pub mod` before `mod` and add a blank line between the groups (see "On `--no-preserve-mod-order`" below) |
+| `--no-pub-mod-first` | preserve source order of `pub mod` / `mod` (default sorts `pub mod` first with a blank line between groups; see "On `--no-pub-mod-first`" below) |
 | `--no-single-line-fields` | preserve source order for same-line `struct` / `union` / `enum` fields and struct-literal fields (default reorders them in place) |
 | `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
 
@@ -324,7 +324,7 @@ observations. There are no flags — every observation rule
 (test-mod skipping, inline-mod recursion, visibility handling)
 is fixed by the source.
 
-## On `--no-preserve-mod-order`
+## On `--no-pub-mod-first`
 
 Counting scopes that contain BOTH a `pub mod foo;` and a private
 `mod foo;` declaration (external declarations only, not inline
@@ -356,11 +356,9 @@ Counting scopes that contain BOTH a `pub mod foo;` and a private
 Aggregate by project (each project votes once for whichever side
 wins its internal majority, ties counted separately): **10/19
 pub-first (53%), 5/19 priv-first (26%), 4/19 tied (21%)**.
-Slight pub-first lean. Default still keeps the relative order from
-the source — turning the flip on by default would silently shuffle
-files for the ~26% of projects that lean priv-first plus the ~21%
-that are split. Pass `--no-preserve-mod-order` if your project follows the
-majority pattern.
+Slight pub-first lean, so the default is pub-mod-first with a
+blank line between groups. Pass `--no-pub-mod-first` to preserve
+source order instead.
 
 ## On `--no-mod-before-use`
 

@@ -136,17 +136,14 @@ fn after() {}
 
 #[test]
 fn pub_mod_first_groups_them_with_blank_line() {
+    // Default behaviour: pub mod before private mod with blank line.
     let input = "\
 mod b;
 pub mod a;
 mod d;
 pub mod c;
 ";
-    let cfg = Config {
-        no_preserve_mod_order: true,
-        ..Config::default()
-    };
-    let out = reorder_source_with(input, &cfg).unwrap();
+    let out = reorder_source_with(input, &Config::default()).unwrap();
     let p_pa = out.find("pub mod a").unwrap();
     let p_pc = out.find("pub mod c").unwrap();
     let p_b = out.find("mod b;").unwrap();
@@ -162,26 +159,31 @@ pub mod c;
 
 #[test]
 fn pub_mod_first_off_keeps_interleaved_order() {
+    // With --no-pub-mod-first, source order is preserved.
     let input = "pub mod a;\nmod b;\npub mod c;\nmod d;\n";
-    let out = reorder_source(input).unwrap();
+    let cfg = Config {
+        no_pub_mod_first: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
     let p_a = out.find("pub mod a").unwrap();
     let p_b = out.find("mod b;").unwrap();
     let p_c = out.find("pub mod c").unwrap();
     let p_d = out.find("mod d;").unwrap();
     assert!(
         p_a < p_b && p_b < p_c && p_c < p_d,
-        "default: keep interleaved:\n{out}"
+        "--no-pub-mod-first: keep interleaved:\n{out}"
     );
     let block = &out[p_a..=p_d];
     assert!(
         !block.contains("\n\n"),
-        "no blank line inside mod block in default:\n{out}"
+        "no blank line inside mod block with --no-pub-mod-first:\n{out}"
     );
 }
 
 #[test]
 fn pub_mod_first_off_preserves_blank_lines_between_mods() {
-    // Default (pub_mod_first off) must not shuffle mod order AND must
+    // With --no-pub-mod-first: must not shuffle mod order AND must
     // preserve blank lines from the source (they live in `trailing`).
     let input = "\
 mod a;
@@ -192,10 +194,14 @@ mod c;
 pub mod d;
 fn x() {}
 ";
-    let out = reorder_source(input).unwrap();
+    let cfg = Config {
+        no_pub_mod_first: true,
+        ..Config::default()
+    };
+    let out = reorder_source_with(input, &cfg).unwrap();
     // Source structure preserved exactly through the mod region.
     assert!(
         out.contains("mod a;\n\nmod b;\nmod c;\n\npub mod d;"),
-        "default mode must preserve mod blank lines verbatim:\n{out}"
+        "--no-pub-mod-first must preserve mod blank lines verbatim:\n{out}"
     );
 }

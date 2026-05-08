@@ -222,8 +222,8 @@ pub(crate) struct Block {
     pub(crate) category: Category,
     pub(crate) trailing: String,
     pub(crate) sort_key: SortKey,
-    /// Visibility for `mod` items, used by the blank-line logic when
-    /// `no_preserve_mod_order` is set (pub-mod-first grouping).
+    /// Visibility for `mod` items, used by the blank-line logic for
+    /// the default pub-mod-first grouping.
     /// `Some(true)` = pub mod, `Some(false)` = private mod,
     /// `None` = not a mod.
     pub(crate) mod_is_pub: Option<bool>,
@@ -270,6 +270,9 @@ pub struct Config {
     pub no_impl_grouping: bool,
     /// Disable splitting imports into std / external / crate-local groups.
     pub no_import_groups: bool,
+    /// Preserve the source order of `pub mod` / `mod` instead of the
+    /// default pub-mod-first grouping.
+    pub no_pub_mod_first: bool,
     /// Disable putting `mod foo;` before `use ...;`. Default is
     /// mod-first — matches the majority pattern in our 21-project
     /// sample (12/21 mod-first vs 7/21 use-first); see README.
@@ -283,10 +286,6 @@ pub struct Config {
     /// move with the following field. Blank lines before the first
     /// emitted field are still removed.
     pub no_trim_field_blanks: bool,
-    /// Disable preserving `pub mod` / `mod` source order. With this
-    /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
-    /// blank-line separator between them.
-    pub no_preserve_mod_order: bool,
     /// Disable reordering same-line field-like lists: single-line
     /// `struct` / `union` / `enum` definitions, struct-literal
     /// expressions. By default these entries are permuted in-place and
@@ -326,7 +325,7 @@ pub(crate) struct SortKey {
     trait_path_len: u8,
     /// Sub-bucket inside a category. For `use` items it encodes the
     /// std → external → crate/super/self/local-mod visual group.
-    /// For `mod` items under `--no-preserve-mod-order` it's reused
+    /// For `mod` items in the default pub-mod-first mode it's reused
     /// as the pub-vs-private subgroup (0 = pub mod, 1 = private mod).
     /// Otherwise 0.
     import_group: u8,
@@ -939,8 +938,7 @@ fn compute_sort_key(
     // siblings sort by prefix-group + length + source order. Other
     // items get a neutral source-order key so they all tie on anchor and fall
     // through to `subgroup` / `original_index` — preserving e.g. the
-    // pub-mod-first secondary-sort path for `mod` items under
-    // `--no-preserve-mod-order`.
+    // pub-mod-first secondary-sort path for `mod` items.
     let anchor = if is_top_level_groupable(category) {
         let key = scope
             .group_keys
@@ -954,11 +952,11 @@ fn compute_sort_key(
 
     // `import_group` field on SortKey is reused as a generic "secondary sort
     // bucket within a category". For Use it is the std/ext/crate-local index;
-    // for Mod under `--no-preserve-mod-order` it is 0=pub, 1=private;
+    // for Mod in the default pub-mod-first mode it is 0=pub, 1=private;
     // otherwise 0.
     let subgroup = if !cfg.no_import_groups && import_group.is_some() {
         import_group_byte
-    } else if cfg.no_preserve_mod_order && category == Category::Mod {
+    } else if !cfg.no_pub_mod_first && category == Category::Mod {
         match mod_is_pub {
             Some(true) => 0,
             Some(false) | None => 1,

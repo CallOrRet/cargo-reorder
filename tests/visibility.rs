@@ -77,6 +77,7 @@ use std::fmt;
 
 #[test]
 fn vis_on_mod_kept_with_mod_decl() {
+    // Default: pub mod first, then private mod, with blank line between.
     let input = "\
 fn z() {}
 pub mod public_api;
@@ -84,12 +85,11 @@ mod internal;
 pub(crate) mod restricted;
 ";
     let out = reorder_source(input).unwrap();
-    // All mods are weight 30 → sort before fn (weight 90), preserving
-    // their relative source order within the Mod bucket.
     let p_public = out.find("pub mod public_api").unwrap();
     let p_internal = out.find("mod internal").unwrap();
     let p_restricted = out.find("pub(crate) mod restricted").unwrap();
     let p_fn = out.find("fn z").unwrap();
-    assert!(p_public < p_internal && p_internal < p_restricted, "{out}");
-    assert!(p_restricted < p_fn, "{out}");
+    // pub mod (public_api, restricted) before private mod (internal)
+    assert!(p_public < p_restricted && p_restricted < p_internal, "{out}");
+    assert!(p_internal < p_fn, "{out}");
 }

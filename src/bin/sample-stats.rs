@@ -11,7 +11,7 @@
 //!    majority have mod before use? (Drives `--no-mod-before-use` stats.)
 //! 2. pub/priv mod — among (`pub mod foo;`, `mod foo;`) pairs, does
 //!    the majority have `pub mod` before private `mod`? (Drives
-//!    `--no-preserve-mod-order` stats.)
+//!    `--no-pub-mod-first` stats.)
 //! 3. trait-vs-struct — among (`trait`, `struct`/`enum`/`union`) pairs,
 //!    does the majority have trait before the type? (Drives
 //!    `--no-trait-before-struct` stats.)

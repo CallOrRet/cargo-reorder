@@ -137,6 +137,13 @@ struct Cli {
     /// Disable splitting `use` items into std / external / crate groups.
     #[arg(long)]
     no_import_groups: bool,
+    /// Preserve the source order of `pub mod` / `mod` instead of
+    /// the default pub-mod-first grouping. By default, `pub mod` items
+    /// are sorted before private `mod` items with a blank line between
+    /// the two groups. Pass this flag to keep the interleaved order
+    /// from source.
+    #[arg(long)]
+    no_pub_mod_first: bool,
     /// Disable putting `mod foo;` before `use ...;` (i.e., switch to
     /// use-first). Default is mod-first because the pair-majority
     /// sample of 21 real-world crates leans 12-vs-7 toward mod-first
@@ -155,13 +162,6 @@ struct Cli {
     /// Blank lines before the first emitted field are always trimmed.
     #[arg(long)]
     no_trim_field_blanks: bool,
-    /// Disable preserving `pub mod` / `mod` source order. With this
-    /// on, `pub mod` items are sorted before private `mod` items with
-    /// a blank line between the two groups. Default is to preserve
-    /// source order — empirically interleaved is the modal pattern
-    /// (11/19 projects in the README sample).
-    #[arg(long)]
-    no_preserve_mod_order: bool,
     /// Disable reordering single-line field-like lists: `struct S { b:
     /// u8, a: u8 }` and `S { b: 1, a: 2 }`. By default those lists are
     /// permuted in place and stay on one line.
@@ -186,10 +186,10 @@ impl Cli {
             no_inline_mods: self.no_inline_mods,
             no_impl_grouping: self.no_impl_grouping,
             no_import_groups: self.no_import_groups,
+            no_pub_mod_first: self.no_pub_mod_first,
             no_mod_before_use: self.no_mod_before_use,
             no_short_trait_first: self.no_short_trait_first,
             no_trim_field_blanks: self.no_trim_field_blanks,
-            no_preserve_mod_order: self.no_preserve_mod_order,
             no_single_line_fields: self.no_single_line_fields,
             no_trait_before_struct: self.no_trait_before_struct,
         }

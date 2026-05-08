@@ -9,10 +9,8 @@
 //!     `crate` / `super` / `self` / `local-mod` share one
 //!     [`VisualGroup`] so they stay glued together.
 //!
-//!   * **`pub mod` / `mod` boundary** (only when
-//!     `cfg.no_preserve_mod_order` is on, which opts into
-//!     pub-mod-first grouping): a blank line between the two `Mod`
-//!     sub-buckets.
+//!   * **`pub mod` / `mod` boundary** (the default pub-mod-first
+//!     grouping): a blank line between the two `Mod` sub-buckets.
 //!
 //! Blank lines that already exist in source trivia (a `Block`'s
 //! `leading` / `trailing`) are respected — we never insert a duplicate.
@@ -87,7 +85,7 @@ fn needs_blank_separator(p: &Block, blk: &Block, cfg: &Config) -> bool {
     if !cfg.no_import_groups && import_boundary(p, blk) {
         return true;
     }
-    if cfg.no_preserve_mod_order && pub_mod_boundary(p, blk) {
+    if !cfg.no_pub_mod_first && pub_mod_boundary(p, blk) {
         return true;
     }
     false
