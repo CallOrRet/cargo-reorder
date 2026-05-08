@@ -212,29 +212,21 @@ impl fmt::Display for ReorderError {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ImportOrigin {
     Std,
-
     Crate,
-
     Unknown,
 }
 
 pub(crate) struct Block {
     pub(crate) body: String,
-
     pub(crate) leading: String,
-
     pub(crate) category: Category,
-
     pub(crate) trailing: String,
-
     pub(crate) sort_key: SortKey,
-
     /// Visibility for `mod` items, used by the blank-line logic when
     /// `no_preserve_mod_order` is set (pub-mod-first grouping).
     /// `Some(true)` = pub mod, `Some(false)` = private mod,
     /// `None` = not a mod.
     pub(crate) mod_is_pub: Option<bool>,
-
     pub(crate) import_group: Option<ImportGroup>,
 }
 
@@ -244,49 +236,66 @@ pub(crate) struct Block {
 /// indirection). See README for the rationale on each flag.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
-    pub no_tests_last: bool,
-    /// Disable splitting imports into std / external / crate-local groups.
-    pub no_import_groups: bool,
-    /// Disable anchoring `impl` blocks to their target type
-    /// (inherent → std trait → external trait).
-    pub no_impl_grouping: bool,
-    /// Disable putting `mod foo;` before `use ...;`. Default is
-    /// mod-first — matches the majority pattern in our 21-project
-    /// sample (12/21 mod-first vs 7/21 use-first); see README.
-    pub no_mod_before_use: bool,
+    /// Enable reordering function parameter lists. This is off by
+    /// default because parameter order is part of a function's call
+    /// contract. When on, the first receiver parameter (`self`,
+    /// `mut self`, `&self`, `&mut self`) stays first and the remaining
+    /// ordinary identifier parameters use the field grouping rule.
+    pub fn_args: bool,
     /// Disable reordering named fields inside `struct` / `union` /
     /// `enum` (and inside enum variants). When off, fields are grouped by
     /// their snake_case / PascalCase / camelCase first word, within each
     /// group sorted shortest-name-first, and the groups are emitted in
-    /// ascending order of the group's mean name length with a blank line
-    /// between them. ABI- and semantics-affecting shapes are always
-    /// skipped: any `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`,
-    /// enums whose any variant carries an explicit discriminant, and
-    /// tuple/unit variants.
-    pub no_reorder_fields: bool,
+    /// ascending order of the group's mean name length. ABI- and
+    /// semantics-affecting shapes are always skipped: any
+    /// `#[repr(...)]`, any `#[derive(PartialOrd | Ord)]`, enums whose
+    /// any variant carries an explicit discriminant, enum variant-order
+    /// sorting when any variant is unit-like, and tuple/unit variants.
+    pub no_fields: bool,
     /// Disable the prefix-group + length sort applied **inside `impl`
     /// and `trait` bodies** (the const → type → fn → async fn category
     /// order, plus the within-category prefix sort). When on, the body
     /// of every `impl` / `trait` is left in the user's source order.
     /// Field-level and top-level grouping are unaffected — those stay
-    /// under `no_reorder_fields`.
-    pub no_reorder_impl_fns: bool,
+    /// under `no_fields`.
+    pub no_impl_fns: bool,
+    /// Disable forcing `#[cfg(test)] mod ...` to the end of the file.
+    pub no_tests_last: bool,
+    /// Disable recursing into inline `mod foo { ... }` blocks.
+    /// See README for the skip list (test mods, `#[macro_use]` mods,
+    /// pure-`use` mods) — those are always skipped regardless.
+    pub no_inline_mods: bool,
+    /// Disable anchoring `impl` blocks to their target type
+    /// (inherent → std trait → external trait).
+    pub no_impl_grouping: bool,
+    /// Disable splitting imports into std / external / crate-local groups.
+    pub no_import_groups: bool,
+    /// Disable putting `mod foo;` before `use ...;`. Default is
+    /// mod-first — matches the majority pattern in our 21-project
+    /// sample (12/21 mod-first vs 7/21 use-first); see README.
+    pub no_mod_before_use: bool,
+    /// Disable ordering shorter trait paths first
+    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
+    pub no_short_trait_first: bool,
+    /// Disable trimming existing blank lines between reordered
+    /// field-like entries. By default, multi-line field sorting removes
+    /// blank lines between fields; with this on, original blank lines
+    /// move with the following field. Blank lines before the first
+    /// emitted field are still removed.
+    pub no_trim_field_blanks: bool,
     /// Disable preserving `pub mod` / `mod` source order. With this
     /// on, `pub mod` blocks are sorted ahead of private `mod`s with a
     /// blank-line separator between them.
     pub no_preserve_mod_order: bool,
+    /// Disable reordering same-line field-like lists: single-line
+    /// `struct` / `union` / `enum` definitions, struct-literal
+    /// expressions. By default these entries are permuted in-place and
+    /// the output stays single-line.
+    pub no_single_line_fields: bool,
     /// Disable putting `trait` ahead of `enum` / `struct` / `union`.
     /// Default is trait-first — matches the majority in our sample
     /// (14/20 trait-first; see README).
     pub no_trait_before_struct: bool,
-    /// Disable recursing into inline `mod foo { ... }` blocks.
-    /// See README for the skip list (test mods, `#[macro_use]` mods,
-    /// pure-`use` mods) — those are always skipped regardless.
-    pub no_reorder_inline_mods: bool,
-    /// Disable ordering shorter trait paths first
-    /// (`impl Debug for Foo` before `impl std::fmt::Debug for Foo`).
-    pub no_short_trait_path_first: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -312,7 +321,7 @@ pub(crate) struct SortKey {
     impl_kind: u8,
     /// Trait-path segment count for trait `impl` blocks (0 for non-impls
     /// and inherent impls). Shorter paths sort first when
-    /// `short_trait_path_first` is on; otherwise this is always 0 and
+    /// `short_trait_first` is on; otherwise this is always 0 and
     /// the field is inert.
     trait_path_len: u8,
     /// Sub-bucket inside a category. For `use` items it encodes the
@@ -330,17 +339,13 @@ pub(crate) struct SortKey {
 /// anchoring, plus the three trait-classification name sets.
 struct ScopeIndex<'a> {
     name_index: &'a HashMap<String, (usize, Category)>,
-
     /// Per-item group key for items in
     /// group-eligible top-level categories
     /// (struct/union/enum/trait/fn/async-fn). Items not in the map
     /// fall back to source order.
     group_keys: &'a HashMap<usize, GroupSortKey>,
-
     std_imports: &'a HashSet<String>,
-
     local_traits: &'a HashSet<String>,
-
     crate_imports: &'a HashSet<String>,
 }
 
@@ -372,7 +377,7 @@ fn type_last_segment(ty: &syn::Type) -> Option<String> {
 }
 
 /// Internal entry point. Recurses into itself for cargo-script
-/// frontmatter stripping and (when `!cfg.no_reorder_inline_mods` is on)
+/// frontmatter stripping and (when `!cfg.no_inline_mods` is on)
 /// for inline `mod foo { ... }` body recursion.
 fn reorder_inner(
     source: &str,
@@ -395,7 +400,7 @@ fn reorder_inner(
         return Ok(source.to_string());
     }
 
-    let owned: Option<String> = if !cfg.no_reorder_inline_mods {
+    let owned: Option<String> = if !cfg.no_inline_mods {
         let new_source = recurse_inline_mods(source, &parsed, cfg)?;
         if let Some(new_src) = new_source {
             parsed = syn::parse_file(&new_src)?;
@@ -483,7 +488,7 @@ fn reorder_inner(
     // Build per-item group keys. Only categories the user wants
     // grouped get a key; other items fall back to source order.
     let mut group_keys: HashMap<usize, GroupSortKey> = HashMap::new();
-    if !cfg.no_reorder_fields {
+    if !cfg.no_fields {
         for (cat, names) in &category_names {
             if !is_top_level_groupable(*cat) {
                 continue;
@@ -539,10 +544,10 @@ fn reorder_inner(
 
     let scope = ScopeIndex {
         name_index: &name_index,
-        std_imports: &std_imports,
-        crate_imports: &crate_imports,
-        local_traits: &local_traits,
         group_keys: &group_keys,
+        std_imports: &std_imports,
+        local_traits: &local_traits,
+        crate_imports: &crate_imports,
     };
     let mut blocks: Vec<Block> = Vec::with_capacity(parsed.items.len());
     for (idx, (item, &(start, end))) in parsed.items.iter().zip(ranges.iter()).enumerate() {
@@ -552,15 +557,32 @@ fn reorder_inner(
             String::new()
         };
         let body = take_lines(&lines, start, end);
-        let body = if cfg.no_reorder_fields {
+        let body = if cfg.no_fields {
             body
-        } else if cfg.no_reorder_impl_fns && matches!(item, Item::Impl(_) | Item::Trait(_)) {
-            // `--no-reorder-impl-fns`: keep impl/trait bodies in
+        } else if cfg.no_impl_fns && matches!(item, Item::Impl(_) | Item::Trait(_)) {
+            // `--no-impl-fns`: keep impl/trait bodies in
             // source order. Field-level (struct/union/enum) reorder
             // still runs — that's a separate pass.
             body
         } else {
-            crate::fields::reorder_in_item(item, &body, start).unwrap_or(body)
+            crate::fields::reorder_in_item(item, &body, start, cfg.no_trim_field_blanks)
+                .unwrap_or(body)
+        };
+        let body = if cfg.no_fields {
+            body
+        } else {
+            crate::fields::reorder_expr_structs_in_item_text(&body, cfg.no_trim_field_blanks)
+                .unwrap_or(body)
+        };
+        let body = if cfg.no_fields || cfg.no_single_line_fields {
+            body
+        } else {
+            crate::fields::reorder_single_line_lists_in_item_text(&body).unwrap_or(body)
+        };
+        let body = if cfg.fn_args {
+            crate::fields::reorder_fn_args_in_item_text(&body).unwrap_or(body)
+        } else {
+            body
         };
         let category = Category::classify(item);
         let import_group = match item {
@@ -586,13 +608,13 @@ fn reorder_inner(
             &scope,
         );
         blocks.push(Block {
-            category,
-            mod_is_pub,
-            import_group,
-            leading,
             body,
+            leading,
+            category,
             trailing: String::new(),
             sort_key,
+            mod_is_pub,
+            import_group,
         });
     }
 
@@ -627,22 +649,22 @@ fn reorder_inner(
         if let Some((comment_text, _)) = fence {
             let fence_segment = segments[i].saturating_add(FENCE_STRIDE / 2);
             blocks.push(Block {
-                category: Category::Fence,
-                mod_is_pub: None,
-                import_group: None,
-                leading: comment_text.clone(),
                 body: String::new(),
+                leading: comment_text.clone(),
+                category: Category::Fence,
                 trailing: String::new(),
                 sort_key: SortKey {
+                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
                     segment: fence_segment,
                     primary: 0,
-                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
                     follower: 0,
                     impl_kind: 0,
-                    trait_path_len: 0,
                     import_group: 0,
+                    trait_path_len: 0,
                     original_index: n_items + fence_idx,
                 },
+                mod_is_pub: None,
+                import_group: None,
             });
             fence_idx += 1;
         }
@@ -868,7 +890,7 @@ fn compute_sort_key(
                     scope.local_traits,
                 ),
             };
-            let trait_path_len = if !cfg.no_short_trait_path_first {
+            let trait_path_len = if !cfg.no_short_trait_first {
                 im.trait_
                     .as_ref()
                     .map(|(_, p, _)| p.segments.len().min(u8::MAX as usize) as u8)
@@ -886,26 +908,26 @@ fn compute_sort_key(
                     .copied()
                     .unwrap_or_else(|| GroupSortKey::source_order(anchor_idx));
                 return SortKey {
+                    anchor: (group_key, anchor_idx),
                     segment,
                     primary: anchor_cat.weight(cfg),
-                    anchor: (group_key, anchor_idx),
                     follower: 1,
                     impl_kind: kind as u8,
-                    trait_path_len,
                     import_group: 0,
+                    trait_path_len,
                     original_index: idx,
                 };
             }
             // Orphan impl: still classify by trait kind so all-std comes before
             // all-external when several orphan impls share the Impl bucket.
             return SortKey {
+                anchor: (GroupSortKey::source_order(0), 0),
                 segment,
                 primary,
-                anchor: (GroupSortKey::source_order(0), 0),
                 follower: 0,
                 impl_kind: kind as u8,
-                trait_path_len,
                 import_group: 0,
+                trait_path_len,
                 original_index: idx,
             };
         }
@@ -946,13 +968,13 @@ fn compute_sort_key(
     };
 
     SortKey {
+        anchor,
         segment,
         primary,
-        anchor,
         follower: 0,
         impl_kind: 0,
-        trait_path_len: 0,
         import_group: subgroup,
+        trait_path_len: 0,
         original_index: idx,
     }
 }

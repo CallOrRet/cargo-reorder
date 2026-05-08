@@ -71,9 +71,7 @@ impl ImportGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualGroup {
     Std,
-
     External,
-
     CrateLocal,
 }
 

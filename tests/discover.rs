@@ -76,8 +76,8 @@ path = "src/lib.rs"
     );
 
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &[],
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).expect("discover");
@@ -116,8 +116,8 @@ path = "src/lib.rs"
     ws.write("src/weird/place.rs", "pub fn p() {}\n");
 
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &[],
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).expect("discover");
@@ -148,8 +148,8 @@ path = "src/lib.rs"
     ws.write("src/outer/inner.rs", "pub fn i() {}\n");
 
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &[],
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).expect("discover");
@@ -204,8 +204,8 @@ path = "examples/ex.rs"
     ws.write("examples/ex.rs", "fn main() {}\n");
 
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &[],
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).expect("discover");
@@ -221,8 +221,8 @@ fn package_flag_filters_to_named_member() {
     let ws = make_workspace_with_two_members();
     let pkgs = ["alpha".to_string()];
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &pkgs,
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).unwrap();
@@ -238,8 +238,8 @@ fn package_flag_unknown_name_is_an_error() {
     let ws = make_workspace_with_two_members();
     let pkgs = ["does-not-exist".to_string()];
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &pkgs,
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let err = discover(opts).unwrap_err();
@@ -250,8 +250,8 @@ fn package_flag_unknown_name_is_an_error() {
 fn virtual_workspace_default_includes_all_members() {
     let ws = make_workspace_with_two_members();
     let opts = DiscoverOptions {
-        all_packages: false,
         packages: &[],
+        all_packages: false,
         manifest_path: Some(&ws.manifest()),
     };
     let found = discover(opts).unwrap();

@@ -224,33 +224,9 @@ fn cfg_test_mod_forced_to_end() {
         out.find("struct S").unwrap() < out.find("fn other").unwrap(),
         "{out}"
     );
-}
-
-#[test]
-fn trait_alias_treated_as_trait() {
-    // `trait Foo = Bar + Baz;` is an unstable feature but still parsed by
-    // syn as `Item::TraitAlias`. It should classify as Trait.
-    let input = "fn helper() {}\ntrait MyAlias = Send + Sync;\nstruct S;\n";
-    let out = reorder_source(input).unwrap();
-    let p_struct = out.find("struct S").unwrap();
-    let p_alias = out.find("trait MyAlias").unwrap();
-    let p_fn = out.find("fn helper").unwrap();
-    // trait-first default: trait alias < struct < fn.
     assert!(
-        p_alias < p_struct && p_struct < p_fn,
-        "trait_alias < struct < fn:\n{out}"
-    );
-}
-
-#[test]
-fn trait_then_enum_then_struct_with_default_flags() {
-    // Default is trait-first (Trait weight 49, Enum 50, Struct 51).
-    let input = "struct S;\nenum E { A }\ntrait T {}\n";
-    let out = reorder_source(input).unwrap();
-    assert!(
-        out.find("trait T").unwrap() < out.find("enum E").unwrap()
-            && out.find("enum E").unwrap() < out.find("struct S").unwrap(),
-        "{out}"
+        !out.ends_with("\n\n"),
+        "tests-last should not carry its original trailing gap to EOF:\n{out:?}"
     );
 }
 
@@ -277,5 +253,32 @@ fn always() {}
     assert!(
         p_struct < p_helper && p_struct < p_always,
         "both fns must be in the Fn bucket, not promoted to TestMod (999):\n{out}"
+    );
+}
+#[test]
+fn trait_alias_treated_as_trait() {
+    // `trait Foo = Bar + Baz;` is an unstable feature but still parsed by
+    // syn as `Item::TraitAlias`. It should classify as Trait.
+    let input = "fn helper() {}\ntrait MyAlias = Send + Sync;\nstruct S;\n";
+    let out = reorder_source(input).unwrap();
+    let p_struct = out.find("struct S").unwrap();
+    let p_alias = out.find("trait MyAlias").unwrap();
+    let p_fn = out.find("fn helper").unwrap();
+    // trait-first default: trait alias < struct < fn.
+    assert!(
+        p_alias < p_struct && p_struct < p_fn,
+        "trait_alias < struct < fn:\n{out}"
+    );
+}
+
+#[test]
+fn trait_then_enum_then_struct_with_default_flags() {
+    // Default is trait-first (Trait weight 49, Enum 50, Struct 51).
+    let input = "struct S;\nenum E { A }\ntrait T {}\n";
+    let out = reorder_source(input).unwrap();
+    assert!(
+        out.find("trait T").unwrap() < out.find("enum E").unwrap()
+            && out.find("enum E").unwrap() < out.find("struct S").unwrap(),
+        "{out}"
     );
 }

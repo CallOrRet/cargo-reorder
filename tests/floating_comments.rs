@@ -192,7 +192,7 @@ fn upper() {}
 use std::fmt;
 ";
     let cfg = Config {
-        no_reorder_inline_mods: true,
+        no_inline_mods: true,
         ..cfg()
     };
     let out = reorder_source_with(input, &cfg).unwrap();

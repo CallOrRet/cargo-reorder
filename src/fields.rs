@@ -11,11 +11,11 @@
 //!   name length** (sum of names / member count). Ties between
 //!   groups preserve source order — whichever group's first member
 //!   appeared earliest in the source goes first.
-//! - A blank line is inserted between consecutive groups. Within a
-//!   group, fields stay packed.
+//! - Existing blank lines before a field move with that field. Field
+//!   sorting does not add blank separators between groups.
 //!
-//! Skip rules — when any of these apply, the item is left exactly as
-//! the user wrote it. Reordering would change ABI, layout, or
+//! Skip rules — when any of these apply, the affected ordering is left
+//! exactly as the user wrote it. Reordering would change ABI, layout, or
 //! derived-trait semantics:
 //! - The container carries any `#[repr(...)]` (`C`, `packed`,
 //!   `transparent`, `align(N)`, integer reprs).
@@ -25,14 +25,19 @@
 //! - On enums, **any** variant has an explicit discriminant
 //!   (`A = 1`); reordering would silently change implicit values for
 //!   the others.
+//! - Enum variant order is left untouched when any variant is unit-like;
+//!   otherwise implicit discriminants on fieldless enums could change.
+//!   Struct-like variant fields may still be sorted independently.
 //! - The body has fewer than two named fields (nothing to do).
 //! - Tuple variants / unit variants / tuple structs — no field
 //!   names to group on.
 
 use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Fields, FieldsNamed, GenericParam, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct,
-    ItemTrait, ItemUnion, TraitBoundModifier, TraitItem, TypeParamBound, WherePredicate,
+    Attribute, ExprStruct, Fields, FieldsNamed, FnArg, GenericParam, ImplItem, Item, ItemEnum,
+    ItemImpl, ItemStruct, ItemTrait, ItemUnion, Member, Pat, Signature, TraitBoundModifier,
+    TraitItem, TypeParamBound, WherePredicate,
 };
 
 /// Sentinel bucket value that pins an entry to the very end of the
@@ -41,20 +46,134 @@ use syn::{
 /// fields, `#[serde(other)]` on enum variants).
 const PIN_LAST: u8 = u8::MAX;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupSortKey {
+    name_len: u32,
+    mean_sum: u64,
+    mean_count: u32,
+    group_order: usize,
+}
+
+impl GroupSortKey {
+    pub(crate) fn source_order(idx: usize) -> Self {
+        Self {
+            name_len: 0,
+            mean_sum: 0,
+            mean_count: 1,
+            group_order: idx,
+        }
+    }
+}
+
+impl Ord for GroupSortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.mean_sum as u128 * other.mean_count as u128)
+            .cmp(&(other.mean_sum as u128 * self.mean_count as u128))
+            .then_with(|| self.group_order.cmp(&other.group_order))
+            .then_with(|| self.name_len.cmp(&other.name_len))
+    }
+}
+
+impl PartialOrd for GroupSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone)]
+struct SortableSpan {
+    hi: usize,
+    lo: usize,
+    name: String,
+    bucket: u8,
+}
+
 #[derive(Clone)]
 struct SortableLines {
     name: String,
-
     /// Sub-bucket within the entry list. Items in lower buckets sort
     /// before items in higher buckets, regardless of their group's
     /// mean. Used by impl/trait body reordering to keep `async fn`
     /// after sync `fn`. Field-level callers usually pass `0`; the
     /// special value [`PIN_LAST`] pins the entry to the end.
     bucket: u8,
-
     last_line: usize,
-
     first_line: usize,
+}
+
+/// Generic line-based reordering. `text` is a chunk of source whose
+/// first line is `text_start_line`. `entries` are the items to sort
+/// (each carries its source line range and a name to group/sort on).
+///
+/// Returns the reordered text. Lines outside the entries' ranges
+/// (header, closing brace, comments before/after the field block) are
+/// preserved.
+///
+/// Callers can choose whether blank lines before entries move with the
+/// following entry. No caller synthesizes separators unless
+/// `insert_blank_lines_between_groups` is enabled.
+#[derive(Clone, Copy)]
+struct LineSortOptions {
+    include_leading_blank_lines: bool,
+    trim_first_leading_blank_lines: bool,
+    insert_blank_lines_between_groups: bool,
+}
+
+impl Default for LineSortOptions {
+    fn default() -> Self {
+        Self {
+            include_leading_blank_lines: false,
+            trim_first_leading_blank_lines: false,
+            insert_blank_lines_between_groups: true,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SignatureCollector {
+    sigs: Vec<Signature>,
+}
+
+impl<'ast> Visit<'ast> for SignatureCollector {
+    fn visit_signature(&mut self, node: &'ast Signature) {
+        self.sigs.push(node.clone());
+        visit::visit_signature(self, node);
+    }
+}
+
+#[derive(Default)]
+struct ExprStructCollector {
+    exprs: Vec<ExprStruct>,
+}
+
+impl<'ast> Visit<'ast> for ExprStructCollector {
+    fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
+        self.exprs.push(node.clone());
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+struct SingleLineListCollector<'a> {
+    text: &'a str,
+    lists: Vec<Vec<SortableSpan>>,
+}
+
+impl<'a> SingleLineListCollector<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            lists: Vec::new(),
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SingleLineListCollector<'_> {
+    fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
+        if let Some(entries) = expr_struct_single_line_entries(self.text, node) {
+            self.lists.push(entries);
+        }
+        visit::visit_expr_struct(self, node);
+    }
 }
 
 /// First "word" of an identifier — text up to the first `_` (snake_case)
@@ -110,183 +229,10 @@ fn member_entry(
         .map(|s| s.start().line)
         .unwrap_or_else(|| span.start().line);
     SortableLines {
-        first_line,
-        last_line: span.end().line,
         name: ident.to_string(),
         bucket,
-    }
-}
-
-/// Generic line-based reordering. `text` is a chunk of source whose
-/// first line is `text_start_line`. `entries` are the items to sort
-/// (each carries its source line range and a name to group/sort on).
-///
-/// Returns the reordered text. Lines outside the entries' ranges
-/// (header, closing brace, comments before/after the field block) are
-/// preserved.
-fn sort_top_level<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
-where
-    I: IntoIterator<Item = SortableLines>,
-{
-    let entries: Vec<SortableLines> = entries.into_iter().collect();
-    if entries.len() < 2 {
-        return None;
-    }
-    // Bail if any two entries share a source line — line-based slicing
-    // can't disentangle them. This protects single-line layouts like
-    // `enum E { A { x: u8, y: u8 }, B }` and `struct S { a: u8, b: u8 }`
-    // (all-on-one-line), which we deliberately leave untouched.
-    let mut prev_last = 0usize;
-    for e in &entries {
-        if e.first_line <= prev_last {
-            return None;
-        }
-        prev_last = e.last_line;
-    }
-
-    // Convert text into a Vec of full-line strings (each ending with \n
-    // except possibly the last). This makes range-based splicing trivial.
-    let lines: Vec<String> = split_lines(text);
-    let total_lines = lines.len();
-
-    // Translate each entry's source line numbers to indices into
-    // `lines`. A line that's `text_start_line + i` maps to `lines[i]`.
-    // We *expand* each entry's line range to also cover comment / blank
-    // lines that immediately precede it (so `///` doc comments travel
-    // with the field). The expansion stops when we hit either:
-    //   - the previous entry's last line, OR
-    //   - the line that contains the opening `{` of the block, OR
-    //   - a blank line that is itself preceded by a non-comment line
-    //     (i.e. the blank line belongs to the structural separator,
-    //     not to this field's leading trivia).
-    let to_idx = |line: usize| -> Option<usize> {
-        line.checked_sub(text_start_line)
-            .filter(|&i| i < total_lines)
-    };
-
-    let mut ranges: Vec<(usize, usize, String, u8)> = Vec::with_capacity(entries.len());
-    let mut prev_end: Option<usize> = None;
-    for e in &entries {
-        let first_idx = to_idx(e.first_line)?;
-        let last_idx = to_idx(e.last_line)?;
-        // Expand backwards over preceding `///`, `//`, `#[...]`, blank
-        // lines that look like part of this field's leading trivia.
-        let mut start = first_idx;
-        while start > prev_end.map(|p| p + 1).unwrap_or(0) {
-            let prev = lines[start - 1].trim_start();
-            if prev.starts_with("///")
-                || prev.starts_with("//!")
-                || prev.starts_with("#[")
-                || prev.starts_with("//")
-            {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        ranges.push((start, last_idx, e.name.clone(), e.bucket));
-        prev_end = Some(last_idx);
-    }
-
-    // Find the first and last line index that any entry covers — that
-    // is, the field-block range. Lines outside this range are header
-    // and footer (`{`/`}` etc).
-    let first_field_line = ranges.first()?.0;
-    let last_field_line = ranges.last()?.1;
-
-    // Header: lines [0, first_field_line). Footer: lines
-    // (last_field_line, end]. Body becomes the reordered concatenation
-    // of each entry's slice plus an additional blank line between groups.
-    let mut header: String = lines[..first_field_line].concat();
-    let footer: String = lines[last_field_line + 1..].concat();
-
-    // Group by (bucket, prefix). HashMap<key, group_idx> picks the
-    // bucket in O(1); we keep a parallel Vec to preserve source-order
-    // first-appearance among groups. Per-group totals (bucket, sum,
-    // count) are tracked alongside so the cross-group sort below
-    // doesn't need to rescan members.
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut group_totals: Vec<(u8, usize, usize)> = Vec::new();
-    let mut by_key: std::collections::HashMap<(u8, String), usize> =
-        std::collections::HashMap::with_capacity(ranges.len());
-    for (idx, (_, _, name, bucket)) in ranges.iter().enumerate() {
-        let key = (*bucket, prefix_of(name).to_string());
-        let name_len = name.len();
-        if let Some(&gi) = by_key.get(&key) {
-            groups[gi].push(idx);
-            group_totals[gi].1 += name_len;
-            group_totals[gi].2 += 1;
-        } else {
-            let gi = groups.len();
-            by_key.insert(key, gi);
-            groups.push(vec![idx]);
-            group_totals.push((*bucket, name_len, 1));
-        }
-    }
-    // Within each group: stable-sort by name length ascending.
-    for g in &mut groups {
-        g.sort_by_key(|&i| ranges[i].2.len());
-    }
-    // Between groups: bucket first (lower bucket sorts first —
-    // implements "all sync `fn` before all `async fn`" inside impl /
-    // trait bodies), then stable-sort by mean name length within the
-    // same bucket. Ties preserve source order. We avoid floats by
-    // comparing `sum_a * count_b` vs `sum_b * count_a`.
-    let mut order: Vec<usize> = (0..groups.len()).collect();
-    order.sort_by(|&a, &b| {
-        let (bucket_a, sum_a, count_a) = group_totals[a];
-        let (bucket_b, sum_b, count_b) = group_totals[b];
-        if bucket_a != bucket_b {
-            return bucket_a.cmp(&bucket_b);
-        }
-        (sum_a * count_b).cmp(&(sum_b * count_a))
-    });
-    let groups: Vec<Vec<usize>> = order
-        .into_iter()
-        .map(|i| std::mem::take(&mut groups[i]))
-        .collect();
-
-    // Emit: each entry's slice (which already ends with \n), with a
-    // blank line between groups.
-    let mut body = String::new();
-    for (gi, g) in groups.iter().enumerate() {
-        if gi > 0 {
-            body.push('\n');
-        }
-        for &i in g {
-            let (lo, hi, _, _) = &ranges[i];
-            for line in &lines[*lo..=*hi] {
-                body.push_str(line);
-            }
-        }
-    }
-    // Strip any trailing blank lines from `body` so the footer's
-    // leading whitespace stays clean.
-    while body.ends_with("\n\n") {
-        body.pop();
-    }
-    // Make sure body ends with exactly one newline.
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    // Make sure header ends with newline (it should, but be safe).
-    if !header.is_empty() && !header.ends_with('\n') {
-        header.push('\n');
-    }
-    Some(format!("{header}{body}{footer}"))
-}
-
-/// Top-level entry point: given a parsed item and its raw source text,
-/// return a rewritten version with fields/variants reordered, or
-/// `None` if no rewrite was performed.
-pub(crate) fn reorder_in_item(item: &Item, body_text: &str, start_line: usize) -> Option<String> {
-    match item {
-        Item::Struct(s) => rewrite_struct(s, body_text, start_line),
-        Item::Union(u) => rewrite_union(u, body_text, start_line),
-        Item::Enum(e) => rewrite_enum(e, body_text, start_line),
-        Item::Impl(i) => rewrite_impl(i, body_text, start_line),
-        Item::Trait(t) => rewrite_trait(t, body_text, start_line),
-        _ => None,
+        last_line: span.end().line,
+        first_line,
     }
 }
 
@@ -343,7 +289,12 @@ fn rewrite_impl(item: &ItemImpl, body_text: &str, start_line: usize) -> Option<S
     )
 }
 
-fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_enum(
+    e: &ItemEnum,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&e.attrs) {
         return None;
     }
@@ -362,9 +313,13 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
             let line_range = field_block_line_range(&out, start_line, named);
             if let Some((line_lo, line_hi)) = line_range {
                 let block_text = lines_slice(&out, start_line, line_lo, line_hi);
-                if let Some(rewritten) =
-                    rewrite_named_fields_inplace(&block_text, line_lo, named, false)
-                {
+                if let Some(rewritten) = rewrite_named_fields_inplace(
+                    &block_text,
+                    line_lo,
+                    named,
+                    false,
+                    preserve_field_blank_lines,
+                ) {
                     let (lo_byte, hi_byte) =
                         byte_range_for_line_range(&out, start_line, line_lo, line_hi);
                     variant_rewrites.push((lo_byte, hi_byte, rewritten));
@@ -377,6 +332,10 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
         out.replace_range(lo..hi, &replacement);
     }
 
+    if e.variants.iter().any(|v| matches!(v.fields, Fields::Unit)) {
+        return (out != body_text).then_some(out);
+    }
+
     // Step 2: sort the variants themselves. Re-parse `out` to get
     // fresh spans matching the post-rewrite text. Note: `syn::parse_str`
     // restarts span line numbering at 1 within the parsed string, so
@@ -387,7 +346,7 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
     let parsed: ItemEnum = syn::parse_str(&out).ok()?;
     // serde-derive forces `#[serde(other)]` to be on the last variant;
     // pin that variant in place and reorder only its predecessors.
-    sort_top_level(
+    sort_field_like_top_level(
         &out,
         1,
         parsed.variants.iter().map(|v| {
@@ -399,21 +358,33 @@ fn rewrite_enum(e: &ItemEnum, body_text: &str, start_line: usize) -> Option<Stri
                 .unwrap_or_else(|| span.start().line);
             let last_line = span.end().line;
             SortableLines {
-                first_line,
-                last_line,
                 name,
                 bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
+                last_line,
+                first_line,
             }
         }),
+        preserve_field_blank_lines,
     )
 }
 
-fn rewrite_union(u: &ItemUnion, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_union(
+    u: &ItemUnion,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&u.attrs) {
         return None;
     }
     let pin_last = has_unsized_generic(&u.generics);
-    rewrite_named_fields_inplace(body_text, start_line, &u.fields, pin_last)
+    rewrite_named_fields_inplace(
+        body_text,
+        start_line,
+        &u.fields,
+        pin_last,
+        preserve_field_blank_lines,
+    )
 }
 
 fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option<String> {
@@ -445,7 +416,12 @@ fn rewrite_trait(item: &ItemTrait, body_text: &str, start_line: usize) -> Option
     )
 }
 
-fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<String> {
+fn rewrite_struct(
+    s: &ItemStruct,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
     if container_skips(&s.attrs) {
         return None;
     }
@@ -457,7 +433,117 @@ fn rewrite_struct(s: &ItemStruct, body_text: &str, start_line: usize) -> Option<
     // compile otherwise), so pin the last named field in place and let
     // the rest reorder normally.
     let pin_last = has_unsized_generic(&s.generics);
-    rewrite_named_fields_inplace(body_text, start_line, named, pin_last)
+    rewrite_named_fields_inplace(
+        body_text,
+        start_line,
+        named,
+        pin_last,
+        preserve_field_blank_lines,
+    )
+}
+
+fn rewrite_expr_struct(
+    text: &str,
+    text_start_line: usize,
+    expr: &ExprStruct,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
+    if expr.fields.len() < 2 {
+        return None;
+    }
+    if expr
+        .fields
+        .iter()
+        .any(|f| !matches!(f.member, Member::Named(_)))
+    {
+        return None;
+    }
+    sort_field_like_top_level(
+        text,
+        text_start_line,
+        expr.fields.iter().map(|f| {
+            let name = match &f.member {
+                Member::Named(ident) => ident.to_string(),
+                Member::Unnamed(_) => String::new(),
+            };
+            let earliest_attr = f.attrs.first().map(|a| a.span());
+            let span = f.span();
+            let first_line = earliest_attr
+                .map(|s| s.start().line)
+                .unwrap_or_else(|| span.start().line);
+            let last_line = span.end().line;
+            SortableLines {
+                name,
+                bucket: 0,
+                last_line,
+                first_line,
+            }
+        }),
+        preserve_field_blank_lines,
+    )
+}
+
+fn rewrite_signature_args(text: &str, sig: &Signature) -> Option<String> {
+    let entries = signature_arg_entries(text, sig)?;
+    rewrite_single_line_list(text, &entries).or_else(|| {
+        sort_top_level_with_options(
+            text,
+            1,
+            entries.iter().map(|e| {
+                let span = &text[e.lo..e.hi];
+                let first_line = 1 + text[..e.lo].bytes().filter(|b| *b == b'\n').count();
+                let last_line = first_line + span.bytes().filter(|b| *b == b'\n').count();
+                SortableLines {
+                    name: e.name.clone(),
+                    bucket: 0,
+                    last_line,
+                    first_line,
+                }
+            }),
+            LineSortOptions {
+                include_leading_blank_lines: true,
+                trim_first_leading_blank_lines: false,
+                insert_blank_lines_between_groups: false,
+            },
+        )
+    })
+}
+
+fn rewrite_single_line_list(text: &str, entries: &[SortableSpan]) -> Option<String> {
+    if entries.len() < 2 {
+        return None;
+    }
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|e| e.lo);
+    let lo = entries.first()?.lo;
+    let hi = entries.last()?.hi;
+    if text.get(lo..hi)?.contains('\n') {
+        return None;
+    }
+
+    let keys = compute_group_keys(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| (idx, e.name.as_str())),
+    );
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by_key(|idx| (entries[*idx].bucket, keys[idx], *idx));
+
+    let replacement = order
+        .iter()
+        .map(|idx| text[entries[*idx].lo..entries[*idx].hi].trim())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if replacement == text[lo..hi] {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len() - (hi - lo) + replacement.len());
+    out.push_str(&text[..lo]);
+    out.push_str(&replacement);
+    out.push_str(&text[hi..]);
+    Some(out)
 }
 
 /// Take a named-fields block (`{ a: u8, b: u16 }`) and rewrite the
@@ -470,12 +556,13 @@ fn rewrite_named_fields_inplace(
     text_start_line: usize,
     named: &FieldsNamed,
     pin_last: bool,
+    preserve_field_blank_lines: bool,
 ) -> Option<String> {
     if named.named.len() < 2 {
         return None;
     }
     let last_idx = named.named.len() - 1;
-    sort_top_level(
+    sort_field_like_top_level(
         text,
         text_start_line,
         named.named.iter().enumerate().map(|(i, f)| {
@@ -487,54 +574,18 @@ fn rewrite_named_fields_inplace(
                 .unwrap_or_else(|| span.start().line);
             let last_line = span.end().line;
             SortableLines {
-                first_line,
-                last_line,
                 name,
                 bucket: if pin_last && i == last_idx {
                     PIN_LAST
                 } else {
                     0
                 },
+                last_line,
+                first_line,
             }
         }),
+        preserve_field_blank_lines,
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct GroupSortKey {
-    mean_sum: u64,
-
-    mean_count: u32,
-
-    group_order: usize,
-
-    name_len: u32,
-}
-
-impl GroupSortKey {
-    pub(crate) fn source_order(idx: usize) -> Self {
-        Self {
-            mean_sum: 0,
-            mean_count: 1,
-            group_order: idx,
-            name_len: 0,
-        }
-    }
-}
-
-impl Ord for GroupSortKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.mean_sum as u128 * other.mean_count as u128)
-            .cmp(&(other.mean_sum as u128 * self.mean_count as u128))
-            .then_with(|| self.group_order.cmp(&other.group_order))
-            .then_with(|| self.name_len.cmp(&other.name_len))
-    }
-}
-
-impl PartialOrd for GroupSortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 /// Compute a per-item group sort key for each `(idx, name)` pair, where:
@@ -565,10 +616,10 @@ where
         out.insert(
             idx,
             GroupSortKey {
+                name_len: name.len() as u32,
                 mean_sum: sum,
                 mean_count: count,
                 group_order,
-                name_len: name.len() as u32,
             },
         );
     }
@@ -637,6 +688,235 @@ fn cfg_attr_pins_order(attr: &Attribute) -> bool {
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .any(|w| w == "Ord" || w == "PartialOrd")
 }
+fn signature_arg_entries(text: &str, sig: &Signature) -> Option<Vec<SortableSpan>> {
+    if sig.inputs.len() < 2 {
+        return None;
+    }
+    let mut inputs = sig.inputs.iter();
+    if matches!(inputs.clone().next(), Some(FnArg::Receiver(_))) {
+        inputs.next();
+    }
+
+    let mut entries = Vec::with_capacity(sig.inputs.len());
+    for input in inputs {
+        let FnArg::Typed(pat) = input else {
+            return None;
+        };
+        if !pat.attrs.is_empty() {
+            return None;
+        }
+        let Pat::Ident(ident) = pat.pat.as_ref() else {
+            return None;
+        };
+        let (lo, hi) = byte_range_for_span(text, input.span())?;
+        entries.push(SortableSpan {
+            hi,
+            lo,
+            name: ident.ident.to_string(),
+            bucket: 0,
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn sort_top_level<I>(text: &str, text_start_line: usize, entries: I) -> Option<String>
+where
+    I: IntoIterator<Item = SortableLines>,
+{
+    sort_top_level_with_options(text, text_start_line, entries, LineSortOptions::default())
+}
+
+fn sort_field_like_top_level<I>(
+    text: &str,
+    text_start_line: usize,
+    entries: I,
+    preserve_blank_lines: bool,
+) -> Option<String>
+where
+    I: IntoIterator<Item = SortableLines>,
+{
+    sort_top_level_with_options(
+        text,
+        text_start_line,
+        entries,
+        LineSortOptions {
+            include_leading_blank_lines: preserve_blank_lines,
+            trim_first_leading_blank_lines: true,
+            insert_blank_lines_between_groups: false,
+        },
+    )
+}
+
+fn sort_top_level_with_options<I>(
+    text: &str,
+    text_start_line: usize,
+    entries: I,
+    options: LineSortOptions,
+) -> Option<String>
+where
+    I: IntoIterator<Item = SortableLines>,
+{
+    let entries: Vec<SortableLines> = entries.into_iter().collect();
+    if entries.len() < 2 {
+        return None;
+    }
+    // Bail if any two entries share a source line — line-based slicing
+    // can't disentangle them. This protects single-line layouts like
+    // `enum E { A { x: u8, y: u8 }, B }` and `struct S { a: u8, b: u8 }`
+    // (all-on-one-line), which we deliberately leave untouched.
+    let mut prev_last = 0usize;
+    for e in &entries {
+        if e.first_line <= prev_last {
+            return None;
+        }
+        prev_last = e.last_line;
+    }
+
+    // Convert text into a Vec of full-line strings (each ending with \n
+    // except possibly the last). This makes range-based splicing trivial.
+    let lines: Vec<String> = split_lines(text);
+    let total_lines = lines.len();
+
+    // Translate each entry's source line numbers to indices into
+    // `lines`. A line that's `text_start_line + i` maps to `lines[i]`.
+    // We *expand* each entry's line range to also cover comment lines
+    // that immediately precede it (so `///` doc comments travel with
+    // the field). Some callers also opt into preserving immediately
+    // preceding blank lines as leading trivia. The expansion stops
+    // when we hit either:
+    //   - the previous entry's last line, OR
+    //   - the line that contains the opening `{` of the block, OR
+    //   - a blank line that is itself preceded by a non-comment line
+    //     (i.e. the blank line belongs to the structural separator,
+    //     not to this field's leading trivia).
+    let to_idx = |line: usize| -> Option<usize> {
+        line.checked_sub(text_start_line)
+            .filter(|&i| i < total_lines)
+    };
+
+    let mut ranges: Vec<(usize, usize, String, u8)> = Vec::with_capacity(entries.len());
+    let mut prev_end: Option<usize> = None;
+    for e in &entries {
+        let first_idx = to_idx(e.first_line)?;
+        let last_idx = to_idx(e.last_line)?;
+        // Expand backwards over preceding `///`, `//`, `#[...]`, and
+        // optionally blank lines that look like part of this entry's
+        // leading trivia.
+        let mut start = first_idx;
+        while start > prev_end.map(|p| p + 1).unwrap_or(0) {
+            let prev = lines[start - 1].trim_start();
+            if prev.starts_with("///")
+                || prev.starts_with("//!")
+                || prev.starts_with("#[")
+                || prev.starts_with("//")
+                || (options.include_leading_blank_lines && prev.trim().is_empty())
+            {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        ranges.push((start, last_idx, e.name.clone(), e.bucket));
+        prev_end = Some(last_idx);
+    }
+
+    // Find the first and last line index that any entry covers — that
+    // is, the field-block range. Lines outside this range are header
+    // and footer (`{`/`}` etc).
+    let first_field_line = ranges.first()?.0;
+    let last_field_line = ranges.last()?.1;
+
+    // Header: lines [0, first_field_line). Footer: lines
+    // (last_field_line, end]. Body becomes the reordered concatenation
+    // of each entry's slice. Some callers insert an additional blank
+    // line between groups.
+    let mut header: String = lines[..first_field_line].concat();
+    let footer: String = lines[last_field_line + 1..].concat();
+
+    // Group by (bucket, prefix). HashMap<key, group_idx> picks the
+    // bucket in O(1); we keep a parallel Vec to preserve source-order
+    // first-appearance among groups. Per-group totals (bucket, sum,
+    // count) are tracked alongside so the cross-group sort below
+    // doesn't need to rescan members.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_totals: Vec<(u8, usize, usize)> = Vec::new();
+    let mut by_key: std::collections::HashMap<(u8, String), usize> =
+        std::collections::HashMap::with_capacity(ranges.len());
+    for (idx, (_, _, name, bucket)) in ranges.iter().enumerate() {
+        let key = (*bucket, prefix_of(name).to_string());
+        let name_len = name.len();
+        if let Some(&gi) = by_key.get(&key) {
+            groups[gi].push(idx);
+            group_totals[gi].1 += name_len;
+            group_totals[gi].2 += 1;
+        } else {
+            let gi = groups.len();
+            by_key.insert(key, gi);
+            groups.push(vec![idx]);
+            group_totals.push((*bucket, name_len, 1));
+        }
+    }
+    // Within each group: stable-sort by name length ascending.
+    for g in &mut groups {
+        g.sort_by_key(|&i| ranges[i].2.len());
+    }
+    // Between groups: bucket first (lower bucket sorts first —
+    // implements "all sync `fn` before all `async fn`" inside impl /
+    // trait bodies), then stable-sort by mean name length within the
+    // same bucket. Ties preserve source order. We avoid floats by
+    // comparing `sum_a * count_b` vs `sum_b * count_a`.
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (bucket_a, sum_a, count_a) = group_totals[a];
+        let (bucket_b, sum_b, count_b) = group_totals[b];
+        if bucket_a != bucket_b {
+            return bucket_a.cmp(&bucket_b);
+        }
+        (sum_a * count_b).cmp(&(sum_b * count_a))
+    });
+    let groups: Vec<Vec<usize>> = order
+        .into_iter()
+        .map(|i| std::mem::take(&mut groups[i]))
+        .collect();
+
+    // Emit: each entry's slice (which already ends with \n). Some
+    // callers insert a blank line between groups; field-like and
+    // function-parameter callers preserve existing separators without
+    // adding new ones.
+    let mut body = String::new();
+    for (gi, g) in groups.iter().enumerate() {
+        if options.insert_blank_lines_between_groups && gi > 0 {
+            body.push('\n');
+        }
+        for (entry_idx, &i) in g.iter().enumerate() {
+            let (lo, hi, _, _) = &ranges[i];
+            let mut line_lo = *lo;
+            if gi == 0 && entry_idx == 0 && options.trim_first_leading_blank_lines {
+                while line_lo <= *hi && lines[line_lo].trim().is_empty() {
+                    line_lo += 1;
+                }
+            }
+            for line in &lines[line_lo..=*hi] {
+                body.push_str(line);
+            }
+        }
+    }
+    // Strip any trailing blank lines from `body` so the footer's
+    // leading whitespace stays clean.
+    while body.ends_with("\n\n") {
+        body.pop();
+    }
+    // Make sure body ends with exactly one newline.
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    // Make sure header ends with newline (it should, but be safe).
+    if !header.is_empty() && !header.ends_with('\n') {
+        header.push('\n');
+    }
+    Some(format!("{header}{body}{footer}"))
+}
+
 /// Find the line range (inclusive, 1-based source lines) that an
 /// inline named-fields block occupies in `text`, given the parsed
 /// `FieldsNamed` whose span coordinates refer to the original source.
@@ -668,6 +948,86 @@ fn derive_list_pins_order(attr: &Attribute) -> bool {
     found
 }
 
+fn single_line_entries(mut entries: Vec<SortableSpan>) -> Option<Vec<SortableSpan>> {
+    if entries.len() < 2 {
+        return None;
+    }
+    entries.sort_by_key(|e| e.lo);
+    let mut prev_hi = 0usize;
+    for e in &entries {
+        if e.lo < prev_hi {
+            return None;
+        }
+        prev_hi = e.hi;
+    }
+    // Byte offsets are not enough to prove same-line; ask the spans'
+    // source text slice range not to contain a newline across the whole
+    // list. This keeps the byte-level rewrite scoped to one physical line.
+    if entries.iter().any(|e| e.name.is_empty()) {
+        return None;
+    }
+    Some(entries)
+}
+
+fn single_line_lists_for_item(text: &str, item: &Item) -> Vec<Vec<SortableSpan>> {
+    let mut out = Vec::new();
+    match item {
+        Item::Struct(s) if !container_skips(&s.attrs) => {
+            if let Fields::Named(named) = &s.fields {
+                if let Some(entries) =
+                    fields_named_single_line_entries(text, named, has_unsized_generic(&s.generics))
+                {
+                    out.push(entries);
+                }
+            }
+        }
+        Item::Union(u) if !container_skips(&u.attrs) => {
+            if let Some(entries) =
+                fields_named_single_line_entries(text, &u.fields, has_unsized_generic(&u.generics))
+            {
+                out.push(entries);
+            }
+        }
+        Item::Enum(e)
+            if !container_skips(&e.attrs)
+                && !e.variants.iter().any(|v| v.discriminant.is_some()) =>
+        {
+            if let Some(entries) = enum_variant_single_line_entries(text, e) {
+                out.push(entries);
+            }
+            for v in &e.variants {
+                if let Fields::Named(named) = &v.fields {
+                    if let Some(entries) = fields_named_single_line_entries(text, named, false) {
+                        out.push(entries);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn byte_range_for_span(text: &str, span: proc_macro2::Span) -> Option<(usize, usize)> {
+    let start = span.start();
+    let end = span.end();
+    let lo = byte_offset_for_line_col(text, start.line, start.column)?;
+    let hi = byte_offset_for_line_col(text, end.line, end.column)?;
+    (lo < hi).then_some((lo, hi))
+}
+
+fn byte_offset_for_line_col(text: &str, line: usize, col: usize) -> Option<usize> {
+    let mut byte = 0usize;
+    for (idx, l) in split_lines(text).iter().enumerate() {
+        if idx + 1 == line {
+            let line_text = l.strip_suffix('\n').unwrap_or(l);
+            return (col <= line_text.len()).then_some(byte + col);
+        }
+        byte += l.len();
+    }
+    None
+}
+
 fn byte_range_for_line_range(
     text: &str,
     text_start_line: usize,
@@ -688,4 +1048,197 @@ fn byte_range_for_line_range(
         end_byte += l.len();
     }
     (byte, end_byte)
+}
+/// Top-level entry point: given a parsed item and its raw source text,
+/// return a rewritten version with fields/variants reordered, or
+/// `None` if no rewrite was performed.
+pub(crate) fn reorder_in_item(
+    item: &Item,
+    body_text: &str,
+    start_line: usize,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
+    match item {
+        Item::Struct(s) => rewrite_struct(s, body_text, start_line, preserve_field_blank_lines),
+        Item::Union(u) => rewrite_union(u, body_text, start_line, preserve_field_blank_lines),
+        Item::Enum(e) => rewrite_enum(e, body_text, start_line, preserve_field_blank_lines),
+        Item::Impl(i) => rewrite_impl(i, body_text, start_line),
+        Item::Trait(t) => rewrite_trait(t, body_text, start_line),
+        _ => None,
+    }
+}
+
+pub(crate) fn reorder_fn_args_in_item_text(body_text: &str) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut collector = SignatureCollector::default();
+        collector.visit_item(&parsed);
+        collector.sigs.sort_by_key(|sig| {
+            let start = sig.span().start();
+            std::cmp::Reverse((start.line, start.column))
+        });
+
+        let mut rewrote_one = false;
+        for sig in collector.sigs {
+            if let Some(rewritten) = rewrite_signature_args(&out, &sig) {
+                if rewritten != out {
+                    out = rewritten;
+                    changed = true;
+                    rewrote_one = true;
+                    break;
+                }
+            }
+        }
+
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+/// Reorder named fields in struct-literal expressions (`S { ... }`,
+/// `U { ... }`, `E::V { ... }`) using the same grouping rule as
+/// declaration fields. The caller passes one complete item body; we
+/// re-parse after each successful rewrite so nested literals are handled
+/// from the inside out without stale spans.
+pub(crate) fn reorder_expr_structs_in_item_text(
+    body_text: &str,
+    preserve_field_blank_lines: bool,
+) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut collector = ExprStructCollector::default();
+        collector.visit_item(&parsed);
+        collector.exprs.sort_by_key(|expr| {
+            let start = expr.span().start();
+            std::cmp::Reverse((start.line, start.column))
+        });
+
+        let mut rewrote_one = false;
+        for expr in collector.exprs {
+            if let Some(rewritten) = rewrite_expr_struct(&out, 1, &expr, preserve_field_blank_lines)
+            {
+                if rewritten != out {
+                    out = rewritten;
+                    changed = true;
+                    rewrote_one = true;
+                    break;
+                }
+            }
+        }
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+pub(crate) fn reorder_single_line_lists_in_item_text(body_text: &str) -> Option<String> {
+    let mut out = body_text.to_string();
+    let mut changed = false;
+
+    loop {
+        let parsed: Item = syn::parse_str(&out).ok()?;
+        let mut lists = single_line_lists_for_item(&out, &parsed);
+        let mut collector = SingleLineListCollector::new(&out);
+        collector.visit_item(&parsed);
+        lists.extend(collector.lists);
+        lists.sort_by_key(|entries| std::cmp::Reverse(entries.first().map(|e| e.lo).unwrap_or(0)));
+
+        let mut rewrote_one = false;
+        for entries in lists {
+            if let Some(rewritten) = rewrite_single_line_list(&out, &entries) {
+                out = rewritten;
+                changed = true;
+                rewrote_one = true;
+                break;
+            }
+        }
+
+        if !rewrote_one {
+            break;
+        }
+    }
+
+    changed.then_some(out)
+}
+
+fn expr_struct_single_line_entries(text: &str, expr: &ExprStruct) -> Option<Vec<SortableSpan>> {
+    if expr.fields.len() < 2 {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(expr.fields.len());
+    for f in &expr.fields {
+        if !f.attrs.is_empty() {
+            return None;
+        }
+        let Member::Named(ident) = &f.member else {
+            return None;
+        };
+        let (lo, hi) = byte_range_for_span(text, f.span())?;
+        entries.push(SortableSpan {
+            hi,
+            lo,
+            name: ident.to_string(),
+            bucket: 0,
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn fields_named_single_line_entries(
+    text: &str,
+    named: &FieldsNamed,
+    pin_last: bool,
+) -> Option<Vec<SortableSpan>> {
+    if named.named.len() < 2 || named.named.iter().any(|f| !f.attrs.is_empty()) {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(named.named.len());
+    let last_index = named.named.len().saturating_sub(1);
+    for (idx, f) in named.named.iter().enumerate() {
+        let name = f.ident.as_ref()?.to_string();
+        let (lo, hi) = byte_range_for_span(text, f.span())?;
+        entries.push(SortableSpan {
+            hi,
+            lo,
+            name,
+            bucket: if pin_last && idx == last_index {
+                PIN_LAST
+            } else {
+                0
+            },
+        });
+    }
+    single_line_entries(entries)
+}
+
+fn enum_variant_single_line_entries(text: &str, e: &ItemEnum) -> Option<Vec<SortableSpan>> {
+    if e.variants.len() < 2
+        || e.variants
+            .iter()
+            .any(|v| !v.attrs.is_empty() || matches!(v.fields, Fields::Unit))
+    {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(e.variants.len());
+    for v in &e.variants {
+        let (lo, hi) = byte_range_for_span(text, v.span())?;
+        entries.push(SortableSpan {
+            hi,
+            lo,
+            name: v.ident.to_string(),
+            bucket: if variant_pinned_last(v) { PIN_LAST } else { 0 },
+        });
+    }
+    single_line_entries(entries)
 }

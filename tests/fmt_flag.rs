@@ -1,5 +1,5 @@
 //! `--fmt` delegates to `cargo fmt`. CLI shape mirrors cargo fmt's,
-//! so whatever cargo fmt would format with the same `--all` / `-p` /
+//! so whatever cargo fmt would format with the same `-p` / `--all` /
 //! `--manifest-path` selection, cargo-reorder operates on the same
 //! files. Skipped under `--check` so a CI gate doesn't write to disk.
 

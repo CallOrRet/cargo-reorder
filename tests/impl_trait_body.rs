@@ -9,7 +9,7 @@ use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 fn opt_out() -> Config {
     Config {
-        no_reorder_fields: true,
+        no_fields: true,
         ..Config::default()
     }
 }
@@ -65,7 +65,7 @@ impl Foo {
 
 fn impl_fns_off() -> Config {
     Config {
-        no_reorder_impl_fns: true,
+        no_impl_fns: true,
         ..Config::default()
     }
 }
@@ -289,10 +289,10 @@ trait Repo {
 }
 
 #[test]
-fn no_reorder_impl_fns_does_not_disable_field_reorder() {
+fn no_impl_fns_does_not_disable_field_reorder() {
     // The new flag is scoped to impl/trait bodies. Struct fields,
     // enum variants, and top-level same-category grouping all stay
-    // under `no_reorder_fields`.
+    // under `no_fields`.
     let input = "\
 struct S {
     user_loooong: u32,
@@ -304,12 +304,12 @@ struct S {
     let p_user = out.find("user_loooong").unwrap();
     assert!(
         p_bar < p_user,
-        "struct fields must still reorder under no_reorder_impl_fns:\n{out}"
+        "struct fields must still reorder under no_impl_fns:\n{out}"
     );
 }
 
 #[test]
-fn no_reorder_impl_fns_keeps_impl_body_in_source_order() {
+fn no_impl_fns_keeps_impl_body_in_source_order() {
     let input = "\
 impl Foo {
     fn user_login(&self) {}
@@ -323,7 +323,7 @@ impl Foo {
 }
 
 #[test]
-fn no_reorder_impl_fns_keeps_trait_body_in_source_order() {
+fn no_impl_fns_keeps_trait_body_in_source_order() {
     let input = "\
 trait Repo {
     fn save_record(&self);

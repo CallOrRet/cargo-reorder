@@ -1,14 +1,14 @@
 //! Top-level same-category grouping: structs/unions/enums/traits/fns/
 //! async-fns within their own category bucket are reordered using the
 //! same prefix-grouping + length-sort rules as field-level. Default
-//! ON; opt out with `Config { no_reorder_fields: true, ..default }`
+//! ON; opt out with `Config { no_fields: true, ..default }`
 //! (the same flag covers both field-level and top-level grouping).
 
 use cargo_reorder::{Config, reorder_source, reorder_source_with};
 
 fn opt_out() -> Config {
     Config {
-        no_reorder_fields: true,
+        no_fields: true,
         ..Config::default()
     }
 }
@@ -89,6 +89,24 @@ fn process_b() {}
 }
 
 #[test]
+fn same_mean_groups_stay_contiguous() {
+    let input = "\
+fn foo_abcde() {}
+fn bar_xyz() {}
+fn foo_a() {}
+";
+    let out = reorder_source(input).unwrap();
+    // Group `foo`: foo_a (5), foo_abcde (9) -> mean 7
+    // Group `bar`: bar_xyz (7) -> mean 7
+    // Equal group means preserve group source order, so the foo group
+    // remains contiguous instead of letting bar_xyz split it.
+    let p_foo_a = out.find("fn foo_a").unwrap();
+    let p_foo_abcde = out.find("fn foo_abcde").unwrap();
+    let p_bar = out.find("fn bar_xyz").unwrap();
+    assert!(p_foo_a < p_foo_abcde && p_foo_abcde < p_bar, "{out}");
+}
+
+#[test]
 fn fn_and_async_fn_are_separate_buckets() {
     // Fn (90) and AsyncFn (91) are different categories; grouping
     // happens within each independently.
@@ -138,24 +156,6 @@ fn cache_set() {}
         p_cget < p_cset && p_cset < p_ulogin && p_ulogin < p_ulogout,
         "{out}"
     );
-}
-
-#[test]
-fn same_mean_groups_stay_contiguous() {
-    let input = "\
-fn foo_abcde() {}
-fn bar_xyz() {}
-fn foo_a() {}
-";
-    let out = reorder_source(input).unwrap();
-    // Group `foo`: foo_a (5), foo_abcde (9) -> mean 7
-    // Group `bar`: bar_xyz (7) -> mean 7
-    // Equal group means preserve group source order, so the foo group
-    // remains contiguous instead of letting bar_xyz split it.
-    let p_foo_a = out.find("fn foo_a").unwrap();
-    let p_foo_abcde = out.find("fn foo_abcde").unwrap();
-    let p_bar = out.find("fn bar_xyz").unwrap();
-    assert!(p_foo_a < p_foo_abcde && p_foo_abcde < p_bar, "{out}");
 }
 
 #[test]

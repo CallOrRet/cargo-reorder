@@ -1,6 +1,6 @@
 //! CLI entry point. Argument shape is intentionally aligned with
-//! `cargo fmt` (`--all`, `-p NAME`, `--manifest-path PATH`,
-//! `--check`, `-v`); whatever files cargo fmt would format with a
+//! `cargo fmt` (`-v`, `-p NAME`, `--all`, `--check`,
+//! `--manifest-path PATH`); whatever files cargo fmt would format with a
 //! given combination, cargo-reorder operates on the same set. The
 //! `--fmt` flag delegates to `cargo fmt` directly so the alignment
 //! holds even when both passes run.
@@ -22,18 +22,14 @@ use cargo_reorder::{Config, reorder_source_with, reorder_source_with_path};
 
 enum Outcome {
     Changed,
-
     Unchanged,
-
     ParseError,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum ColorChoice {
     Auto,
-
     Never,
-
     Always,
 }
 
@@ -47,7 +43,7 @@ FILE DISCOVERY:
   cargo-reorder runs `cargo metadata --no-deps` and walks every
   selected package's module tree from each target's root, exactly the
   way `cargo fmt` does. Same arguments → same files. Selection flags
-  (`--all` / `-p` / `--manifest-path`) match cargo fmt one-to-one.
+  (`-p` / `--all` / `--manifest-path`) match cargo fmt one-to-one.
 
   With a piped stdin and no selection flag, source is read from stdin
   and the reordered result is written to stdout (filter mode).
@@ -73,46 +69,68 @@ struct Cli {
     /// Process every workspace member (matches `cargo fmt --all`).
     #[arg(long, conflicts_with = "package")]
     all: bool,
-
-    /// Run `cargo fmt` (with the same `--all` / `-p` / `--manifest-path`
+    /// Run `cargo fmt` (with the same `-p` / `--all` / `--manifest-path`
     /// args you passed here) *before* the reorder pass. Skipped under
     /// `--check` so a CI gate doesn't accidentally write to disk;
     /// combine your own `cargo fmt --check` step with `cargo-reorder
     /// --check` if you want both to gate independently.
     #[arg(long)]
     fmt: bool,
-
     /// Print a unified diff for every file that would change and exit 1
     /// if any do. Does not modify files.
     #[arg(long)]
     check: bool,
-
     /// Coloured diff and error output: `auto` (default — colour when
     /// stderr is a tty and `NO_COLOR` is unset), `always`, or `never`.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto, value_name = "WHEN")]
     color: ColorChoice,
-
     /// Process only the named package(s) (matches `cargo fmt -p NAME`).
     #[arg(short = 'p', long = "package", value_name = "NAME")]
     package: Vec<String>,
-
     /// Verbose: log every file rewritten (default mode is silent).
     #[arg(short, long)]
     verbose: bool,
-
+    /// Reorder function parameters. Off by default because parameter
+    /// order is part of the call contract. When on, the first receiver
+    /// (`self`, `mut self`, `&self`, `&mut self`) stays first and the
+    /// remaining ordinary identifier parameters use the field grouping
+    /// rule.
+    #[arg(long)]
+    fn_args: bool,
     /// Path to the `Cargo.toml` to use for metadata discovery.
     #[arg(long, value_name = "PATH")]
     manifest_path: Option<PathBuf>,
-
     /// Extra arguments after `--` are forwarded verbatim to `cargo fmt`
     /// (which in turn forwards them to `rustfmt`). Only meaningful with
     /// `--fmt`. Mirrors cargo fmt's own `cargo fmt -- <rustfmt_options>`.
     #[arg(last = true, value_name = "RUSTFMT_OPTIONS")]
     rustfmt_options: Vec<String>,
-
+    /// Disable reordering named fields inside `struct` / `union` /
+    /// `enum`. By default, fields are grouped by their first word
+    /// (snake_case `_` separator or PascalCase / camelCase boundary);
+    /// within each group sorted shortest-first; groups emitted in
+    /// ascending order of the group's mean name length. ABI- and
+    /// semantics-affecting shapes are always skipped (see README).
+    #[arg(long)]
+    no_fields: bool,
+    /// Disable the prefix-group + length sort applied inside `impl`
+    /// and `trait` bodies (covers `const` / `type` / `fn` / `async fn`
+    /// members). With this flag, every `impl` / `trait` body stays in
+    /// source order — useful when methods follow a deliberate sequence
+    /// (builder chain, lifecycle order, etc.). Field-level and
+    /// top-level grouping stay under `--no-fields`.
+    #[arg(long)]
+    no_impl_fns: bool,
     /// Do not force `#[cfg(test)] mod ...` to the end of the file.
     #[arg(long)]
     no_tests_last: bool,
+    /// Skip recursing into inline `mod foo { ... }` blocks. By default
+    /// inline mod bodies are reordered with the same rules. Test mods
+    /// (`#[cfg(test)]`), `#[macro_use]` mods, and pure-`use` mods
+    /// (prelude / __private / sealed re-export shims) are always
+    /// skipped because their listing order is part of the contract.
+    #[arg(long)]
+    no_inline_mods: bool,
     /// Disable anchoring `impl` blocks to their target type.
     #[arg(long)]
     no_impl_grouping: bool,
@@ -127,23 +145,16 @@ struct Cli {
     /// `tracing`).
     #[arg(long)]
     no_mod_before_use: bool,
-    /// Disable reordering named fields inside `struct` / `union` /
-    /// `enum`. By default, fields are grouped by their first word
-    /// (snake_case `_` separator or PascalCase / camelCase boundary);
-    /// within each group sorted shortest-first; groups emitted in
-    /// ascending order of the group's mean name length with a blank
-    /// line between them. ABI- and semantics-affecting shapes are
-    /// always skipped (see README).
+    /// Disable ordering shorter trait paths first. By default,
+    /// `impl Debug for Foo` precedes `impl std::fmt::Debug for Foo`
+    /// when both target the same type and classify identically.
     #[arg(long)]
-    no_reorder_fields: bool,
-    /// Disable the prefix-group + length sort applied inside `impl`
-    /// and `trait` bodies (covers `const` / `type` / `fn` / `async fn`
-    /// members). With this flag, every `impl` / `trait` body stays in
-    /// source order — useful when methods follow a deliberate sequence
-    /// (builder chain, lifecycle order, etc.). Field-level and
-    /// top-level grouping stay under `--no-reorder-fields`.
+    no_short_trait_first: bool,
+    /// Preserve existing blank lines between reordered multi-line
+    /// field-like entries. By default those blank lines are trimmed.
+    /// Blank lines before the first emitted field are always trimmed.
     #[arg(long)]
-    no_reorder_impl_fns: bool,
+    no_trim_field_blanks: bool,
     /// Disable preserving `pub mod` / `mod` source order. With this
     /// on, `pub mod` items are sorted before private `mod` items with
     /// a blank line between the two groups. Default is to preserve
@@ -151,13 +162,11 @@ struct Cli {
     /// (11/19 projects in the README sample).
     #[arg(long)]
     no_preserve_mod_order: bool,
-    /// Skip recursing into inline `mod foo { ... }` blocks. By default
-    /// inline mod bodies are reordered with the same rules. Test mods
-    /// (`#[cfg(test)]`), `#[macro_use]` mods, and pure-`use` mods
-    /// (prelude / __private / sealed re-export shims) are always
-    /// skipped because their listing order is part of the contract.
+    /// Disable reordering single-line field-like lists: `struct S { b:
+    /// u8, a: u8 }` and `S { b: 1, a: 2 }`. By default those lists are
+    /// permuted in place and stay on one line.
     #[arg(long)]
-    no_reorder_inline_mods: bool,
+    no_single_line_fields: bool,
     /// Disable putting `trait` ahead of `enum` / `struct` / `union`
     /// (i.e., switch to struct-first). Default is trait-first — in
     /// the 21-project sample 14/20 lean trait-first under
@@ -165,26 +174,24 @@ struct Cli {
     /// put structs / enums first.
     #[arg(long)]
     no_trait_before_struct: bool,
-    /// Disable ordering shorter trait paths first. By default,
-    /// `impl Debug for Foo` precedes `impl std::fmt::Debug for Foo`
-    /// when both target the same type and classify identically.
-    #[arg(long)]
-    no_short_trait_path_first: bool,
 }
 
 impl Cli {
     fn config(&self) -> Config {
         Config {
-            no_mod_before_use: self.no_mod_before_use,
-            no_preserve_mod_order: self.no_preserve_mod_order,
-            no_trait_before_struct: self.no_trait_before_struct,
-            no_import_groups: self.no_import_groups,
-            no_impl_grouping: self.no_impl_grouping,
+            fn_args: self.fn_args,
+            no_fields: self.no_fields,
+            no_impl_fns: self.no_impl_fns,
             no_tests_last: self.no_tests_last,
-            no_reorder_inline_mods: self.no_reorder_inline_mods,
-            no_short_trait_path_first: self.no_short_trait_path_first,
-            no_reorder_fields: self.no_reorder_fields,
-            no_reorder_impl_fns: self.no_reorder_impl_fns,
+            no_inline_mods: self.no_inline_mods,
+            no_impl_grouping: self.no_impl_grouping,
+            no_import_groups: self.no_import_groups,
+            no_mod_before_use: self.no_mod_before_use,
+            no_short_trait_first: self.no_short_trait_first,
+            no_trim_field_blanks: self.no_trim_field_blanks,
+            no_preserve_mod_order: self.no_preserve_mod_order,
+            no_single_line_fields: self.no_single_line_fields,
+            no_trait_before_struct: self.no_trait_before_struct,
         }
     }
 }
@@ -223,7 +230,7 @@ fn run(cli: Cli) -> Result<i32> {
 
     // Filter mode: no selection flag + piped stdin → read source from
     // stdin, write reordered result to stdout. Skips `--fmt` (no file
-    // path to hand cargo fmt) and ignores `--check` / `-v` (filter
+    // path to hand cargo fmt) and ignores `-v` / `--check` (filter
     // mode is for one-shot pipelines).
     let no_selection = !cli.all && cli.package.is_empty() && cli.manifest_path.is_none();
     if no_selection && !io::stdin().is_terminal() {
@@ -250,8 +257,8 @@ fn run(cli: Cli) -> Result<i32> {
     }
 
     let opts = DiscoverOptions {
-        all_packages: cli.all,
         packages: &cli.package,
+        all_packages: cli.all,
         manifest_path: cli.manifest_path.as_deref(),
     };
     let files = discover(opts).context("discovering files via `cargo metadata`")?;
@@ -280,7 +287,7 @@ fn run(cli: Cli) -> Result<i32> {
     Ok(0)
 }
 
-/// Forward the user's `--all` / `-p` / `--manifest-path` to
+/// Forward the user's `-p` / `--all` / `--manifest-path` to
 /// `cargo fmt`. Same arguments → same files cargo fmt would format.
 /// cargo fmt invokes `rustfmt` per package internally, so we don't
 /// need to worry about ARG_MAX / chunking / edition handling — that's
