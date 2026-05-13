@@ -174,6 +174,14 @@ struct Cli {
     /// put structs / enums first.
     #[arg(long)]
     no_trait_before_struct: bool,
+    /// Disable attaching floating `//` comment blocks to the item
+    /// below them. By default, a `//`-line comment block sandwiched
+    /// between blank lines on both sides moves with the item below
+    /// it. Pass this flag to make such comments act as fixed section
+    /// dividers (fences) — items above and below cannot reorder
+    /// across them.
+    #[arg(long)]
+    no_floating_comment_attach: bool,
 }
 
 impl Cli {
@@ -192,6 +200,7 @@ impl Cli {
             no_trim_field_blanks: self.no_trim_field_blanks,
             no_single_line_fields: self.no_single_line_fields,
             no_trait_before_struct: self.no_trait_before_struct,
+            no_floating_comment_attach: self.no_floating_comment_attach,
         }
     }
 }

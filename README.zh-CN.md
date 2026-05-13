@@ -210,6 +210,7 @@ mod tests {
 | `--no-preserve-mod-order` | `pub mod` 排在 `mod` 之前并加空行（见「关于 `--no-preserve-mod-order`」） |
 | `--no-single-line-fields` | 保留单行 `struct` / `union` / `enum` 字段、struct 初始化字段的源序（默认会原地重排） |
 | `--no-trait-before-struct` | `enum` / `struct` 排在 `trait` 之前（默认 trait-first；见「关于 `--no-trait-before-struct`」） |
+| `--no-floating-comment-attach` | 将前后有空行包围的 `//` / `/* */` 注释块作为固定的章节分隔（默认会跟随下方 item 一起移动） |
 
 ### 输出模式
 
@@ -411,7 +412,7 @@ struct Foo {                  struct Foo {
 * doc 注释（`///`、`//!`）和 `#[...]` 属性始终跟随对应的 item
 * item 正上方紧贴的 `//` 或 `/* */` 注释跟随该 item 移动
 * 如果某个注释块和下面的 item 之间隔了空行，则视为上一个 item 的尾部内容；如果它在第一个 item 之前，则视为文件级的头注释,留在文件顶部
-* **前后都被空行包围的 `//` 注释块视为「浮动栅栏」**:它原地不动,且栅栏上方的 item 不允许被排到栅栏下方(反之亦然)。适合保留手写的章节分隔,例如:
+* **前后都被空行包围的 `//` 或 `/* */` 注释块默认会跟随下方的 item 一起移动**。加上 `--no-floating-comment-attach` 后,它变为「浮动栅栏」:原地不动,且栅栏上方的 item 不允许被排到栅栏下方(反之亦然)。适合保留手写的章节分隔,例如:
   ```rust
   // === public API ===
 
@@ -421,7 +422,7 @@ struct Foo {                  struct Foo {
 
   fn ...
   ```
-  每个段落独立排序,分隔线本身不挪。doc 注释(`///`、`//!`)不属于栅栏 —— syn 会把它们当成下一个 item 的 attribute。
+  doc 注释(`///`、`//!`)不属于浮动注释 —— syn 会把它们当成下一个 item 的 attribute。
 * shebang（`#!/usr/bin/env ...`）和 crate 级内部属性（`#![...]`）始终留在文件最顶部
 
 ## 用法

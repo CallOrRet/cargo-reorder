@@ -260,6 +260,7 @@ either): work at the package level instead.
 | `--no-pub-mod-first` | preserve source order of `pub mod` / `mod` (default sorts `pub mod` first with a blank line between groups; see "On `--no-pub-mod-first`" below) |
 | `--no-single-line-fields` | preserve source order for same-line `struct` / `union` / `enum` fields and struct-literal fields (default reorders them in place) |
 | `--no-trait-before-struct` | sort `enum` / `struct` before `trait` (default is trait-first; see "On `--no-trait-before-struct`" below) |
+| `--no-floating-comment-attach` | keep floating `//` / `/* */` comment blocks as fixed section dividers (default attaches them to the item below so they move together) |
 
 ### Output mode
 
@@ -575,10 +576,12 @@ Comments and attributes are preserved:
 - a comment block separated from the item below by a blank line is treated as
   trailing trivia of the item above — or, before the first item, as a
   file-level header that stays at the top
-- a `//` comment block surrounded by blank lines on **both** sides is a
-  *floating fence*: it stays anchored to its source position and items above
-  it are forbidden from reordering past items below it (and vice versa). Use
-  this to keep hand-written section dividers intact, e.g.
+- a `//` or `/* */` comment block surrounded by blank lines on **both** sides is a
+  *floating comment*: by default it attaches to the item below it and moves
+  with that item during reordering. Pass `--no-floating-comment-attach` to
+  make it act as a *fence* instead — staying anchored to its source position
+  and forbidding items above from reordering past items below (and vice
+  versa). This lets you keep hand-written section dividers intact, e.g.
   ```rust
   // === public API ===
 
@@ -588,9 +591,8 @@ Comments and attributes are preserved:
 
   fn ...
   ```
-  Each section is sorted independently; the dividers don't move. Doc comments
-  (`///`, `//!`) are excluded from this rule because syn associates them with
-  the next item as attributes.
+  Doc comments (`///`, `//!`) are excluded from this rule because syn
+  associates them with the next item as attributes.
 - shebang lines and crate-level inner attributes (`#![...]`) always remain at
   the top of the file
 

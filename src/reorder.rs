@@ -10,7 +10,9 @@ use syn::{File, Item};
 
 use crate::fields::GroupSortKey;
 use crate::imports::ImportGroup;
-use crate::text::{extract_floating_comment, split_at_last_blank, split_keep_endings, take_lines};
+use crate::text::{
+    extract_floating_comment, line_is_blank, split_at_last_blank, split_keep_endings, take_lines,
+};
 
 /// Traits auto-imported by the Rust compiler via the std/core prelude —
 /// the union of v1 (2015/2018), rust_2021, and rust_2024 entries.
@@ -295,6 +297,13 @@ pub struct Config {
     /// Default is trait-first — matches the majority in our sample
     /// (14/20 trait-first; see README).
     pub no_trait_before_struct: bool,
+    /// Disable attaching floating `//` comment blocks to the item below
+    /// them. By default a `//`-line comment block sandwiched between
+    /// blank lines on both sides is treated as leading trivia of the
+    /// item below it and moves with that item. With this flag on,
+    /// the comment instead becomes a fixed section divider (fence):
+    /// items above and below are forbidden from reordering across it.
+    pub no_floating_comment_attach: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -534,7 +543,7 @@ fn reorder_inner(
     let mut fence_bump: u32 = 0;
     for i in 0..parsed.items.len() {
         bumped_segments[i] = bumped_segments[i].saturating_add(fence_bump);
-        if i < num_gaps {
+        if i < num_gaps && cfg.no_floating_comment_attach {
             if let Some((comment, residual)) = extract_floating_comment(&gaps[i]) {
                 fence_after[i] = Some((comment, residual));
                 fence_bump = fence_bump.saturating_add(FENCE_STRIDE);
@@ -627,48 +636,69 @@ fn reorder_inner(
     }
 
     for i in 0..num_gaps {
-        let effective_gap = match &fence_after[i] {
-            Some((_, residual)) => residual.clone(),
-            None => gaps[i].clone(),
-        };
-        let (trailing, next_leading) = split_at_last_blank(&effective_gap);
-        blocks[i].trailing = trailing;
-        blocks[i + 1].leading = next_leading;
+        if cfg.no_floating_comment_attach {
+            // Fence mode: comment extracted as fence, use residual gap.
+            let effective_gap = match &fence_after[i] {
+                Some((_, residual)) => residual.clone(),
+                None => gaps[i].clone(),
+            };
+            let (trailing, next_leading) = split_at_last_blank(&effective_gap);
+            blocks[i].trailing = trailing;
+            blocks[i + 1].leading = next_leading;
+        } else if let Some((_comment, _residual)) = extract_floating_comment(&gaps[i]) {
+            // Attach mode: floating comment goes to the next item's leading.
+            // Split *before* the comment so it moves with the item below.
+            let lines = split_keep_endings(&gaps[i]);
+            let first_non_blank = lines
+                .iter()
+                .position(|l| !line_is_blank(l))
+                .unwrap_or(lines.len());
+            let trailing: String = lines[..first_non_blank].concat();
+            let leading: String = lines[first_non_blank..].concat();
+            blocks[i].trailing = trailing;
+            blocks[i + 1].leading = leading;
+        } else {
+            let (trailing, next_leading) = split_at_last_blank(&gaps[i]);
+            blocks[i].trailing = trailing;
+            blocks[i + 1].leading = next_leading;
+        }
     }
 
-    // Append fence blocks. Each one sits on `bumped_segments[i] +
-    // FENCE_STRIDE/2`, which is strictly between the preceding item's
-    // (post-bump) segment and the next item's (already further bumped)
-    // segment — so sort_by_key keeps the fence wedged between them
-    // regardless of how items shuffle within their own segments.
-    // `original_index = n_items + fence_idx` parks fences just past
-    // the real items so the stable-sort tiebreaker keeps them next to
-    // their original neighbours, without colliding with any real
+    // Append fence blocks (only in fence mode). Each one sits on
+    // `bumped_segments[i] + FENCE_STRIDE/2`, which is strictly between
+    // the preceding item's (post-bump) segment and the next item's
+    // (already further bumped) segment — so sort_by_key keeps the fence
+    // wedged between them regardless of how items shuffle within their
+    // own segments. `original_index = n_items + fence_idx` parks fences
+    // just past the real items so the stable-sort tiebreaker keeps them
+    // next to their original neighbours, without colliding with any real
     // item's [0, n_items) index range.
-    let n_items = parsed.items.len();
-    let mut fence_idx = 0usize;
-    for (i, fence) in fence_after.iter().enumerate() {
-        if let Some((comment_text, _)) = fence {
-            let fence_segment = segments[i].saturating_add(FENCE_STRIDE / 2);
-            blocks.push(Block {
-                body: String::new(),
-                leading: comment_text.clone(),
-                category: Category::Fence,
-                trailing: String::new(),
-                sort_key: SortKey {
-                    anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
-                    segment: fence_segment,
-                    primary: 0,
-                    follower: 0,
-                    impl_kind: 0,
-                    import_group: 0,
-                    trait_path_len: 0,
-                    original_index: n_items + fence_idx,
-                },
-                mod_is_pub: None,
-                import_group: None,
-            });
-            fence_idx += 1;
+    if cfg.no_floating_comment_attach {
+        let n_items = parsed.items.len();
+        let mut fence_idx = 0usize;
+        for (i, fence) in fence_after.iter().enumerate() {
+            if let Some((comment_text, _)) = fence {
+                let fence_segment = segments[i].saturating_add(FENCE_STRIDE / 2);
+                blocks.push(Block {
+                    body: String::new(),
+                    leading: comment_text.clone(),
+                    category: Category::Fence,
+                    trailing: String::new(),
+                    sort_key: SortKey {
+                        anchor: (GroupSortKey::source_order(n_items + fence_idx), 0),
+                        segment: fence_segment,
+                        primary: 0,
+                        follower: 0,
+                        impl_kind: 0,
+                        import_group: 0,
+                        trait_path_len: 0,
+                        original_index: n_items + fence_idx,
+                    },
+                    mod_is_pub: None,
+                    import_group: None,
+                });
+                fence_idx += 1;
+            }
         }
     }
 

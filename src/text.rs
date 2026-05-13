@@ -98,22 +98,20 @@ pub(crate) fn starts_with_blank_line(s: &str) -> bool {
     s.starts_with('\n') || s.starts_with("\r\n")
 }
 
-/// If `gap` between two items looks like
+/// If `gap` between two items looks like a comment block sandwiched by
+/// blank lines on both sides, return `Some((comment_text_with_trailing_blank,
+/// residual_gap))`.
+///
 /// ```text
 /// [one or more blank lines]
-/// [one or more `//` comment lines]   <-- but not `///` or `//!` doc comments
+/// [one or more `//` comment lines]          <-- but not `///` or `//!`
+///     and/or
+/// [one or more `/* ... */` comment lines]    <-- single- or multi-line
 /// [one or more blank lines]
 /// ```
-/// return `Some((comment_text_with_trailing_blank, residual_gap))`. The
-/// caller treats the comment as a "fence" anchored to its original spot
-/// (items above and below the fence are forbidden from reordering across
-/// it) and feeds `residual_gap` to [`split_at_last_blank`] for the
-/// trailing/leading split between the two items.
 ///
 /// `///` outer-doc and `//!` inner-doc comments are excluded — those
-/// usually belong to a sibling item and would normally be parsed as
-/// attributes by `syn` (so they shouldn't show up here, but we guard
-/// anyway).
+/// belong to a sibling item and are normally parsed as attributes by `syn`.
 pub(crate) fn extract_floating_comment(gap: &str) -> Option<(String, String)> {
     let lines = split_keep_endings(gap);
     if lines.is_empty() {
@@ -125,19 +123,42 @@ pub(crate) fn extract_floating_comment(gap: &str) -> Option<(String, String)> {
         return None;
     }
     let mut after = first_non_blank;
+    let mut in_block_comment = false;
     for (i, line) in lines.iter().enumerate().skip(first_non_blank) {
         if line_is_blank(line) {
+            if in_block_comment {
+                // Unclosed `/* ... */` — not a valid floating comment.
+                return None;
+            }
             after = i;
             break;
         }
         let t = line.trim_start();
+        if in_block_comment {
+            // Inside a multi-line `/* ... */` — accept any content.
+            if t.contains("*/") {
+                in_block_comment = false;
+            }
+            after = i + 1;
+            continue;
+        }
+        // Block-comment start (single- or multi-line).
+        if t.starts_with("/*") {
+            if !t.contains("*/") {
+                in_block_comment = true;
+            }
+            after = i + 1;
+            continue;
+        }
+        // Pure `//` line comment (exclude doc comments).
         if !t.starts_with("//") || t.starts_with("///") || t.starts_with("//!") {
             return None;
         }
         after = i + 1;
     }
-    // `after` is now the index of the first blank line after the comment
-    // block, or lines.len() if the gap ended with the comment.
+    if in_block_comment {
+        return None;
+    }
     if after >= lines.len() || !line_is_blank(lines[after]) {
         return None;
     }
@@ -196,10 +217,81 @@ mod tests {
     }
 
     #[test]
-    fn floating_comment_rejects_block_comment() {
-        // `/* ... */` is intentionally not handled — these are rare as
-        // floating dividers and the line-based heuristic skips them.
-        assert!(extract_floating_comment("\n/* hi */\n\n").is_none());
+    fn floating_comment_single_line_block() {
+        let (c, r) = extract_floating_comment("\n/* hi */\n\n").unwrap();
+        assert_eq!(c, "/* hi */\n\n");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_multi_line_block() {
+        let input = "\n/* hello\n   world */\n\n";
+        let (c, r) = extract_floating_comment(input).unwrap();
+        assert!(c.contains("/* hello"), "must contain opening: {c:?}");
+        assert!(c.contains("world */"), "must contain closing: {c:?}");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_mixed_line_and_block() {
+        // `//` and `/* */` mingled without blank lines = one block.
+        let (c, r) = extract_floating_comment("\n// line\n/* block */\n\n").unwrap();
+        assert!(c.contains("// line"), "{c:?}");
+        assert!(c.contains("/* block */"), "{c:?}");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_block_unclosed_rejected() {
+        assert!(extract_floating_comment("\n/* unclosed\n\n").is_none());
+    }
+
+    #[test]
+    fn floating_comment_block_star_slash_on_own_line() {
+        // Multi-line style where `*/` sits alone.
+        let (c, r) = extract_floating_comment("\n/* hello\n * world\n */\n\n").unwrap();
+        assert!(c.contains("/* hello"), "{c:?}");
+        assert!(c.contains(" */"), "{c:?}");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_block_with_leading_whitespace() {
+        // Indented block comment — `    /* ... */` — still counts.
+        let (c, r) = extract_floating_comment("\n    /* indented */\n\n").unwrap();
+        assert_eq!(c, "    /* indented */\n\n");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_block_empty_single_line() {
+        // `/**/` is a valid (empty) block comment.
+        let (c, r) = extract_floating_comment("\n/**/\n\n").unwrap();
+        assert_eq!(c, "/**/\n\n");
+        assert_eq!(r, "\n");
+    }
+
+    #[test]
+    fn floating_comment_block_rejects_no_leading_blank() {
+        assert!(extract_floating_comment("/* hi */\n\n").is_none());
+    }
+
+    #[test]
+    fn floating_comment_block_rejects_no_trailing_blank() {
+        assert!(extract_floating_comment("\n/* hi */\n").is_none());
+    }
+
+    #[test]
+    fn floating_comment_rejects_code_with_inline_block_comment() {
+        // `some_code(); /* comment */` is code, not a pure comment block.
+        assert!(extract_floating_comment("\nsome_code(); /* comment */\n\n").is_none());
+    }
+
+    #[test]
+    fn floating_comment_rejects_line_with_mid_line_block_start() {
+        // A line that contains `/*` but doesn't start with it — not a
+        // comment-only line; could be a struct field or expression.
+        assert!(extract_floating_comment("\nx = /* why */ 1;\n\n").is_none());
     }
 
     #[test]
